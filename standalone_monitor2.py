@@ -10,28 +10,30 @@ from curl_cffi import requests
 from flask import Flask, jsonify
 
 # ==========================================
-# ⚙️ COMPLETE COVERAGE + ULTRA FAST
+# ⚙️ COMPLETE COVERAGE + ULTRA FAST + ALWAYS AWAKE
 # ==========================================
 
 TOKEN_MEN = os.environ.get("TOKEN_MEN")
 TOKEN_WOMEN = os.environ.get("TOKEN_WOMEN")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 PORT = int(os.environ.get("PORT", 8080))
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")  # Render provides this automatically
 
 SESSION_DB_PATH = "session_monitor.db"
 CHECK_INTERVAL = 0.01  # Ultra fast - 10ms
 NUM_WORKERS = 150  # More workers for parallel processing
 PAGE_FETCH_WORKERS = 20  # Parallel page fetchers
+SELF_PING_INTERVAL = 600  # 10 minutes (600 seconds)
 
 CATEGORY_CONFIGS = {
     'Universal': {
         'url': "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=0&pageSize=45&format=json&query=%3Arelevance&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
     },
     'Women': {
-        'url': "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=0&pageSize=45&format=json&query=%3Arelevance%3Agenderfilter%3AWomen&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=genderfilter%3AWomen&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
+        'url': "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&Page=0&pageSize=45&format=json&query=%3Arelevance%3Agenderfilter%3AWomen&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=genderfilter%3AWomen&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
     },
     'Men': {
-        'url': "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=0&pageSize=45&format=json&query=%3Arelevance%3Agenderfilter%3AMen&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=genderfilter%3AMen&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
+        'url': "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&Page=0&pageSize=45&format=json&query=%3Arelevance%3Agenderfilter%3AMen&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=genderfilter%3AMen&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
     }
 }
 
@@ -45,7 +47,7 @@ api_session = requests.Session()
 
 def log(message, level="INFO"):
     timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-    icons = {"INFO": "ℹ️", "SUCCESS": "✅", "ERROR": "❌", "WARNING": "⚠️", "FAST": "⚡"}
+    icons = {"INFO": "ℹ️", "SUCCESS": "✅", "ERROR": "❌", "WARNING": "⚠️", "FAST": "⚡", "PING": "🔔"}
     icon = icons.get(level, "📝")
     print(f"[{timestamp}] {icon} {message}", flush=True)
 
@@ -129,6 +131,37 @@ def get_target_token(cat_name, product_data):
         elif 'men' in seg_text:
             return TOKEN_MEN
         return TOKEN_WOMEN
+
+# ==========================================
+# 🔔 SELF-PING KEEPER (PREVENTS SLEEP)
+# ==========================================
+
+def self_ping_keeper():
+    """Pings own URL every 10 minutes to prevent Render.com from sleeping"""
+    import requests as req
+
+    # Wait for Flask to start
+    time.sleep(30)
+
+    ping_url = RENDER_URL if RENDER_URL else "https://product-monitor.onrender.com"
+    if not ping_url.startswith('http'):
+        ping_url = f"https://{ping_url}"
+
+    health_url = f"{ping_url}/health"
+
+    log(f"🔔 Self-ping keeper started - Will ping {health_url} every 10 minutes", "PING")
+
+    while True:
+        try:
+            time.sleep(SELF_PING_INTERVAL)  # Sleep for 10 minutes
+
+            response = req.get(health_url, timeout=10)
+            if response.status_code == 200:
+                log(f"🔔 Self-ping successful - Service kept awake", "PING")
+            else:
+                log(f"⚠️ Self-ping returned {response.status_code}", "WARNING")
+        except Exception as e:
+            log(f"⚠️ Self-ping failed: {e}", "WARNING")
 
 # ==========================================
 # 🚀 COMPLETE COVERAGE ULTRA FAST MONITOR
@@ -281,7 +314,7 @@ class CompleteCoverageMonitor:
 
         # Queue all page fetch tasks
         for page_num in range(total_pages):
-            page_url = re.sub(r'currentPage=\d+', f'currentPage={page_num}', base_url)
+            page_url = re.sub(r'Page=\d+', f'Page={page_num}', base_url)
             self.page_fetch_queue.put({
                 'request_id': request_id,
                 'page_num': page_num,
@@ -318,7 +351,7 @@ class CompleteCoverageMonitor:
         while self.running:
             try:
                 # Fetch first page to get total pages
-                first_page_url = re.sub(r'currentPage=\d+', 'currentPage=0', base_url)
+                first_page_url = re.sub(r'Page=\d+', 'currentPage=0', base_url)
                 data = fetch_api(first_page_url)
 
                 if not isinstance(data, dict):
@@ -387,6 +420,7 @@ class CompleteCoverageMonitor:
         log(f"⚡ {PAGE_FETCH_WORKERS} PAGE FETCHERS READY", "SUCCESS")
         log(f"⚡ CHECK INTERVAL: {CHECK_INTERVAL}s (ULTRA FAST)", "SUCCESS")
         log("⚡ FETCHING ALL PAGES - NO PRODUCTS MISSED!", "SUCCESS")
+        log("🔔 SELF-PING ACTIVE - NEVER SLEEPS!", "PING")
         log("⚡⚡⚡ 24/7 MONITORING ACTIVE ⚡⚡⚡", "FAST")
 
         # Start DB writer
@@ -399,6 +433,9 @@ class CompleteCoverageMonitor:
         # Start alert workers
         for _ in range(NUM_WORKERS):
             threading.Thread(target=self._alert_worker, daemon=True).start()
+
+        # Start self-ping keeper (PREVENTS SLEEP!)
+        threading.Thread(target=self_ping_keeper, daemon=True).start()
 
         # Start category monitors
         for cat in CATEGORY_CONFIGS.keys():
@@ -418,18 +455,24 @@ class CompleteCoverageMonitor:
 
 monitor_instance = None
 start_time = datetime.now()
+ping_count = 0
 
 @app.route('/health')
 def health():
+    global ping_count
+    ping_count += 1
     uptime = (datetime.now() - start_time).total_seconds()
     return jsonify({
         "status": "healthy",
-        "mode": "COMPLETE COVERAGE + ULTRA FAST",
+        "mode": "COMPLETE COVERAGE + ULTRA FAST + ALWAYS AWAKE",
         "uptime_hours": round(uptime / 3600, 2),
         "alert_workers": NUM_WORKERS,
         "page_fetchers": PAGE_FETCH_WORKERS,
         "check_interval": CHECK_INTERVAL,
         "coverage": "ALL PAGES",
+        "self_ping_active": True,
+        "ping_count": ping_count,
+        "never_sleeps": True,
         "running": monitor_instance.running if monitor_instance else False,
         "runs_247": True,
         "independent_of_laptop": True
@@ -439,10 +482,11 @@ def health():
 def home():
     return jsonify({
         "service": "Complete Coverage Monitor",
-        "mode": "MAXIMUM SPEED + ALL PAGES",
+        "mode": "MAXIMUM SPEED + ALL PAGES + ALWAYS AWAKE",
         "platform": "Render.com (24/7 Cloud)",
-        "version": "5.0 - Complete Coverage",
-        "laptop_required": False
+        "version": "6.0 - Never Sleeps",
+        "laptop_required": False,
+        "self_ping": "Active - Prevents sleep mode"
     })
 
 def run_flask():
@@ -456,6 +500,7 @@ def run_flask():
 if __name__ == "__main__":
     log("⚡⚡⚡ RENDER.COM - 24/7 CLOUD MONITORING ⚡⚡⚡", "FAST")
     log("🔥 LAPTOP NOT REQUIRED - RUNS ON CLOUD 24/7", "SUCCESS")
+    log("🔔 SELF-PING ENABLED - NEVER GOES TO SLEEP!", "PING")
 
     required_vars = ["TOKEN_MEN", "TOKEN_WOMEN", "ADMIN_CHAT_ID", "COOKIE_FILE_CONTENT"]
     missing = [v for v in required_vars if not os.environ.get(v)]
