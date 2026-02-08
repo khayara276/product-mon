@@ -10,7 +10,7 @@ from curl_cffi import requests
 from flask import Flask, jsonify
 
 # ==========================================
-# ⚙️ ULTRA FAST CONFIGURATION
+# ⚙️ COMPLETE COVERAGE + ULTRA FAST
 # ==========================================
 
 TOKEN_MEN = os.environ.get("TOKEN_MEN")
@@ -20,8 +20,8 @@ PORT = int(os.environ.get("PORT", 8080))
 
 SESSION_DB_PATH = "session_monitor.db"
 CHECK_INTERVAL = 0.01  # Ultra fast - 10ms
-NUM_WORKERS = 100  # More workers for parallel processing
-BATCH_SIZE = 5  # Send in small batches for speed
+NUM_WORKERS = 150  # More workers for parallel processing
+PAGE_FETCH_WORKERS = 20  # Parallel page fetchers
 
 CATEGORY_CONFIGS = {
     'Universal': {
@@ -38,7 +38,6 @@ CATEGORY_CONFIGS = {
 app = Flask(__name__)
 
 api_session = requests.Session()
-tg_session = requests.Session()
 
 # ==========================================
 # 🛠️ UTILITY FUNCTIONS
@@ -132,15 +131,18 @@ def get_target_token(cat_name, product_data):
         return TOKEN_WOMEN
 
 # ==========================================
-# 🚀 ULTRA FAST MONITOR
+# 🚀 COMPLETE COVERAGE ULTRA FAST MONITOR
 # ==========================================
 
-class UltraFastMonitor:
+class CompleteCoverageMonitor:
     def __init__(self):
         self.running = True
         self.alert_queue = queue.Queue()
         self.db_queue = queue.Queue()
         self.session_cache = set()
+        self.page_fetch_queue = queue.Queue()
+        self.page_results = {}
+        self.page_results_lock = threading.Lock()
 
         if os.path.exists(SESSION_DB_PATH):
             try:
@@ -175,7 +177,7 @@ class UltraFastMonitor:
                 pid = self.db_queue.get(timeout=0.1)
                 batch.append(pid)
 
-                if len(batch) >= 50:
+                if len(batch) >= 100:
                     try:
                         conn.executemany("INSERT OR IGNORE INTO session_seen (product_id) VALUES (?)", 
                                        [(p,) for p in batch])
@@ -210,11 +212,10 @@ class UltraFastMonitor:
                 item = self.alert_queue.get(timeout=1)
 
                 pid = item['id']
-                cat_name = item['category']
                 token = item['token']
                 product = item['product']
 
-                # Extract data from listing API
+                # Extract data
                 name = product.get('name', 'New Product')
 
                 # Price
@@ -242,24 +243,81 @@ class UltraFastMonitor:
 
                 # Send immediately
                 send_telegram_fast(msg, token, image_url=image_url, button_url=buy_url)
-                log(f"⚡ Sent: {pid}", "FAST")
 
                 self.alert_queue.task_done()
             except queue.Empty:
                 continue
-            except Exception as e:
+            except:
                 pass
+
+    def _page_fetcher_worker(self):
+        """Worker to fetch pages in parallel"""
+        while self.running:
+            try:
+                task = self.page_fetch_queue.get(timeout=1)
+                if task is None:
+                    break
+
+                request_id = task['request_id']
+                page_num = task['page_num']
+                url = task['url']
+
+                data = fetch_api(url)
+
+                with self.page_results_lock:
+                    if request_id not in self.page_results:
+                        self.page_results[request_id] = {}
+                    self.page_results[request_id][page_num] = data
+
+                self.page_fetch_queue.task_done()
+            except queue.Empty:
+                continue
+            except:
+                pass
+
+    def fetch_all_pages_parallel(self, cat_name, base_url, total_pages):
+        """Fetch ALL pages in parallel for maximum speed"""
+        request_id = f"{cat_name}_{int(time.time())}"
+
+        # Queue all page fetch tasks
+        for page_num in range(total_pages):
+            page_url = re.sub(r'currentPage=\d+', f'currentPage={page_num}', base_url)
+            self.page_fetch_queue.put({
+                'request_id': request_id,
+                'page_num': page_num,
+                'url': page_url
+            })
+
+        # Wait for all pages to be fetched
+        self.page_fetch_queue.join()
+
+        # Collect results in order
+        all_products = []
+        with self.page_results_lock:
+            if request_id in self.page_results:
+                for page_num in range(total_pages):
+                    if page_num in self.page_results[request_id]:
+                        data = self.page_results[request_id][page_num]
+                        if isinstance(data, dict):
+                            products = data.get('products', [])
+                            all_products.extend(products)
+
+                # Cleanup
+                del self.page_results[request_id]
+
+        return all_products
 
     def process_category(self, cat_name):
         config = CATEGORY_CONFIGS[cat_name]
         base_url = config['url']
 
-        log(f"Monitoring {cat_name} (ULTRA FAST MODE)", "SUCCESS")
+        log(f"Monitoring {cat_name} (COMPLETE COVERAGE MODE)", "SUCCESS")
 
         consecutive_failures = 0
 
         while self.running:
             try:
+                # Fetch first page to get total pages
                 first_page_url = re.sub(r'currentPage=\d+', 'currentPage=0', base_url)
                 data = fetch_api(first_page_url)
 
@@ -277,19 +335,12 @@ class UltraFastMonitor:
                 pagination = data.get('pagination', {})
                 total_pages = pagination.get('totalPages', 1)
 
-                # Process all pages in parallel
-                all_products = []
-                page_products = data.get('products', [])
-                all_products.extend(page_products)
+                log(f"[{cat_name}] Fetching ALL {total_pages} pages...", "INFO")
 
-                # Fetch remaining pages (max 10 for speed)
-                if total_pages > 1:
-                    for page_num in range(1, min(total_pages, 10)):
-                        page_url = re.sub(r'currentPage=\d+', f'currentPage={page_num}', base_url)
-                        page_data = fetch_api(page_url)
-                        if isinstance(page_data, dict):
-                            page_products = page_data.get('products', [])
-                            all_products.extend(page_products)
+                # Fetch ALL pages in parallel
+                all_products = self.fetch_all_pages_parallel(cat_name, base_url, total_pages)
+
+                log(f"[{cat_name}] Collected {len(all_products)} products from {total_pages} pages", "SUCCESS")
 
                 # Find new products
                 new_items = []
@@ -308,7 +359,7 @@ class UltraFastMonitor:
 
                 count = len(new_items)
                 if count > 0:
-                    log(f"[{cat_name}] {count} NEW! ⚡⚡⚡", "FAST")
+                    log(f"[{cat_name}] {count} NEW PRODUCTS! ⚡⚡⚡", "FAST")
 
                     # Queue all for immediate sending
                     for pid, p in new_items:
@@ -322,22 +373,28 @@ class UltraFastMonitor:
 
                 time.sleep(CHECK_INTERVAL)
             except Exception as e:
+                log(f"[{cat_name}] Error: {e}", "ERROR")
                 time.sleep(1)
 
     def start(self):
-        log("⚡⚡⚡ ULTRA FAST MONITOR STARTING ⚡⚡⚡", "FAST")
+        log("⚡⚡⚡ COMPLETE COVERAGE ULTRA FAST MONITOR ⚡⚡⚡", "FAST")
 
         if not setup_api_session():
             log("Setup failed", "ERROR")
             return
 
-        log(f"⚡ {NUM_WORKERS} WORKERS READY", "SUCCESS")
+        log(f"⚡ {NUM_WORKERS} ALERT WORKERS READY", "SUCCESS")
+        log(f"⚡ {PAGE_FETCH_WORKERS} PAGE FETCHERS READY", "SUCCESS")
         log(f"⚡ CHECK INTERVAL: {CHECK_INTERVAL}s (ULTRA FAST)", "SUCCESS")
-        log("⚡ NO DETAIL API = NO 403 ERRORS", "SUCCESS")
-        log("⚡⚡⚡ MAXIMUM SPEED MODE ACTIVE ⚡⚡⚡", "FAST")
+        log("⚡ FETCHING ALL PAGES - NO PRODUCTS MISSED!", "SUCCESS")
+        log("⚡⚡⚡ 24/7 MONITORING ACTIVE ⚡⚡⚡", "FAST")
 
         # Start DB writer
         threading.Thread(target=self._db_writer, daemon=True).start()
+
+        # Start page fetcher workers
+        for _ in range(PAGE_FETCH_WORKERS):
+            threading.Thread(target=self._page_fetcher_worker, daemon=True).start()
 
         # Start alert workers
         for _ in range(NUM_WORKERS):
@@ -347,7 +404,7 @@ class UltraFastMonitor:
         for cat in CATEGORY_CONFIGS.keys():
             threading.Thread(target=self.process_category, args=(cat,), daemon=True).start()
 
-        log("⚡ ALL SYSTEMS OPERATIONAL", "SUCCESS")
+        log("⚡ ALL SYSTEMS OPERATIONAL - 24/7 MODE", "SUCCESS")
 
         try:
             while True:
@@ -367,20 +424,25 @@ def health():
     uptime = (datetime.now() - start_time).total_seconds()
     return jsonify({
         "status": "healthy",
-        "mode": "ULTRA FAST",
+        "mode": "COMPLETE COVERAGE + ULTRA FAST",
         "uptime_hours": round(uptime / 3600, 2),
-        "workers": NUM_WORKERS,
+        "alert_workers": NUM_WORKERS,
+        "page_fetchers": PAGE_FETCH_WORKERS,
         "check_interval": CHECK_INTERVAL,
-        "running": monitor_instance.running if monitor_instance else False
+        "coverage": "ALL PAGES",
+        "running": monitor_instance.running if monitor_instance else False,
+        "runs_247": True,
+        "independent_of_laptop": True
     })
 
 @app.route('/')
 def home():
     return jsonify({
-        "service": "Ultra Fast Monitor",
-        "mode": "MAXIMUM SPEED",
-        "platform": "Render.com",
-        "version": "4.0 - Lightning Fast"
+        "service": "Complete Coverage Monitor",
+        "mode": "MAXIMUM SPEED + ALL PAGES",
+        "platform": "Render.com (24/7 Cloud)",
+        "version": "5.0 - Complete Coverage",
+        "laptop_required": False
     })
 
 def run_flask():
@@ -392,7 +454,8 @@ def run_flask():
 # ==========================================
 
 if __name__ == "__main__":
-    log("⚡⚡⚡ RENDER.COM - ULTRA FAST MODE ⚡⚡⚡", "FAST")
+    log("⚡⚡⚡ RENDER.COM - 24/7 CLOUD MONITORING ⚡⚡⚡", "FAST")
+    log("🔥 LAPTOP NOT REQUIRED - RUNS ON CLOUD 24/7", "SUCCESS")
 
     required_vars = ["TOKEN_MEN", "TOKEN_WOMEN", "ADMIN_CHAT_ID", "COOKIE_FILE_CONTENT"]
     missing = [v for v in required_vars if not os.environ.get(v)]
@@ -407,5 +470,5 @@ if __name__ == "__main__":
     flask_thread.start()
     log(f"Health endpoint on port {PORT}", "SUCCESS")
 
-    monitor_instance = UltraFastMonitor()
+    monitor_instance = CompleteCoverageMonitor()
     monitor_instance.start()
