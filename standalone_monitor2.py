@@ -1,34 +1,28 @@
 import json
 import time
-import random
 import threading
 import queue
 import os
 import re
-import requests
 import sqlite3
 from datetime import datetime
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from curl_cffi import requests
 from flask import Flask, jsonify
 
 # ==========================================
 # ⚙️ CONFIGURATION
 # ==========================================
 
-# Tokens from environment
 TOKEN_MEN = os.environ.get("TOKEN_MEN")
 TOKEN_WOMEN = os.environ.get("TOKEN_WOMEN")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 PORT = int(os.environ.get("PORT", 8080))
 
-# Settings
 SESSION_DB_PATH = "session_monitor.db"
 CHECK_INTERVAL = 0.05
 NUM_WORKERS = 50
 BURST_TRIGGER_THRESHOLD = 15
 
-# API URLs
 CATEGORY_CONFIGS = {
     'Universal': {
         'url': "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=0&pageSize=45&format=json&query=%3Arelevance&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
@@ -41,30 +35,23 @@ CATEGORY_CONFIGS = {
     }
 }
 
-# Flask app for health check
 app = Flask(__name__)
 
-# Sessions
-tg_session = requests.Session()
+# Create session with Chrome impersonation
 api_session = requests.Session()
-
-retry_config = Retry(total=5, backoff_factor=0.2, status_forcelist=[500, 502, 503, 504])
-tg_session.mount('https://', HTTPAdapter(max_retries=retry_config, pool_connections=200, pool_maxsize=200))
-api_session.mount('https://', HTTPAdapter(max_retries=retry_config, pool_connections=200, pool_maxsize=200))
+tg_session = requests.Session()
 
 # ==========================================
 # 🛠️ UTILITY FUNCTIONS
 # ==========================================
 
 def log(message, level="INFO"):
-    """Enhanced logging with timestamp"""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     icons = {"INFO": "ℹ️", "SUCCESS": "✅", "ERROR": "❌", "WARNING": "⚠️"}
     icon = icons.get(level, "📝")
     print(f"[{timestamp}] {icon} {message}", flush=True)
 
 def setup_api_session():
-    """Setup API session with cookies and headers"""
     try:
         cookie_content = os.environ.get("COOKIE_FILE_CONTENT")
         if not cookie_content:
@@ -82,26 +69,12 @@ def setup_api_session():
             if name and value:
                 cookies_dict[name] = value
 
-        api_session.cookies.update(cookies_dict)
+        # Update session with cookies
+        for name, value in cookies_dict.items():
+            api_session.cookies.set(name, value, domain=".sheinindia.in")
 
-        # Set realistic browser headers
-        api_session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Referer': 'https://www.sheinindia.in/',
-            'Origin': 'https://www.sheinindia.in',
-            'Connection': 'keep-alive',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin',
-            'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-            'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"Windows"',
-        })
-
-        log(f"API session configured with {len(api_session.cookies)} cookies", "SUCCESS")
+        log(f"API session configured with {len(cookies_dict)} cookies", "SUCCESS")
+        log("Using Chrome 120 TLS fingerprint impersonation", "INFO")
         return True
 
     except Exception as e:
@@ -109,16 +82,21 @@ def setup_api_session():
         return False
 
 def fetch_api(url):
-    """Fetch data from API"""
+    """Fetch data from API with Chrome impersonation"""
     try:
         # Add cache buster
         separator = '&' if '?' in url else '?'
         url_with_ts = f"{url}{separator}_t={int(time.time() * 1000)}"
 
-        response = api_session.get(url_with_ts, timeout=15)
+        # Use curl-cffi with Chrome impersonation
+        response = api_session.get(
+            url_with_ts,
+            impersonate="chrome120",
+            timeout=15
+        )
 
         if response.status_code == 403:
-            log(f"403 Access Denied - Check cookies", "ERROR")
+            log(f"403 Access Denied - Akamai blocked", "ERROR")
             return "403_ERROR"
 
         if response.status_code != 200:
@@ -127,15 +105,11 @@ def fetch_api(url):
 
         return response.json()
 
-    except requests.exceptions.Timeout:
-        log("Request timeout", "ERROR")
-        return "TIMEOUT"
     except Exception as e:
         log(f"API fetch error: {e}", "ERROR")
         return None
 
 def send_telegram(message, token, image_url=None, button_url=None):
-    """Send message via Telegram"""
     try:
         payload = {
             "chat_id": ADMIN_CHAT_ID,
@@ -158,14 +132,15 @@ def send_telegram(message, token, image_url=None, button_url=None):
             payload["text"] = message
             payload["disable_web_page_preview"] = False
 
-        resp = tg_session.post(url, data=payload, timeout=30)
+        # Use regular requests for Telegram (no impersonation needed)
+        import requests as req
+        resp = req.post(url, data=payload, timeout=30)
         if resp.status_code == 200:
             log("Telegram message sent", "SUCCESS")
     except Exception as e:
         log(f"Telegram error: {e}", "ERROR")
 
 def get_target_token(cat_name, product_data):
-    """Route notification to appropriate channel"""
     if cat_name == 'Men':
         return TOKEN_MEN
     elif cat_name == 'Women':
@@ -182,7 +157,7 @@ def get_target_token(cat_name, product_data):
 # 🚀 MONITOR CLASS
 # ==========================================
 
-class BrowserFreeMonitor:
+class AkamaiBypasser:
     def __init__(self):
         self.running = True
         self.details_queue = queue.Queue()
@@ -192,7 +167,6 @@ class BrowserFreeMonitor:
         if os.path.exists(SESSION_DB_PATH):
             try:
                 os.remove(SESSION_DB_PATH)
-                log("Session DB cleared", "SUCCESS")
             except:
                 pass
 
@@ -227,8 +201,6 @@ class BrowserFreeMonitor:
                 self.db_queue.task_done()
             except queue.Empty:
                 continue
-            except:
-                pass
 
         conn.close()
 
@@ -268,15 +240,12 @@ class BrowserFreeMonitor:
 
                 detail_url = f"https://www.sheinindia.in/api/p/{pid}?fields=SITE"
 
-                # Retry mechanism
                 data = None
-                for attempt in range(5):
-                    log(f"Fetching {pid} (Attempt {attempt+1}/5)", "INFO")
+                for attempt in range(3):
                     data = fetch_api(detail_url)
                     if isinstance(data, dict):
-                        log(f"Details fetched: {pid}", "SUCCESS")
                         break
-                    time.sleep(1.5)
+                    time.sleep(2)
 
                 if isinstance(data, dict):
                     self.format_and_send_alert(pid, cat_name, data, is_burst, token)
@@ -286,8 +255,6 @@ class BrowserFreeMonitor:
                 self.details_queue.task_done()
             except queue.Empty:
                 continue
-            except:
-                pass
 
     def extract_image_url(self, full_data):
         try:
@@ -385,8 +352,8 @@ class BrowserFreeMonitor:
                 data = fetch_api(first_page_url)
 
                 if data == "403_ERROR":
-                    log(f"[{cat_name}] 403 error - Check cookies", "ERROR")
-                    time.sleep(5)
+                    log(f"[{cat_name}] Akamai blocked - Retrying with delay...", "WARNING")
+                    time.sleep(10)
                     continue
 
                 if not isinstance(data, dict):
@@ -395,8 +362,6 @@ class BrowserFreeMonitor:
 
                 pagination = data.get('pagination', {})
                 total_pages = pagination.get('totalPages', 1)
-
-                log(f"[{cat_name}] Processing {total_pages} pages", "INFO")
 
                 all_products = []
                 for page_num in range(total_pages):
@@ -409,9 +374,9 @@ class BrowserFreeMonitor:
                             page_products = page_data.get('products', [])
                         else:
                             page_products = []
+                        time.sleep(0.5)  # Delay between pages
 
                     all_products.extend(page_products)
-                    log(f"[{cat_name}] Page {page_num+1}/{total_pages} done", "INFO")
 
                 new_items = []
                 for p in all_products:
@@ -464,7 +429,8 @@ class BrowserFreeMonitor:
                 time.sleep(2)
 
     def start(self):
-        log("=== BROWSER-FREE MONITOR STARTING ===", "INFO")
+        log("=== AKAMAI BYPASSER STARTING ===", "INFO")
+        log("Using curl-cffi with Chrome 120 impersonation", "INFO")
 
         if not setup_api_session():
             log("API session setup failed", "ERROR")
@@ -504,16 +470,17 @@ def health():
         "status": "healthy",
         "uptime_seconds": uptime,
         "uptime_hours": round(uptime / 3600, 2),
-        "running": monitor_instance.running if monitor_instance else False
+        "running": monitor_instance.running if monitor_instance else False,
+        "bypass_method": "curl-cffi Chrome120"
     })
 
 @app.route('/')
 def home():
     return jsonify({
-        "service": "Product Monitor (Browser-Free)",
+        "service": "Product Monitor (Akamai Bypasser)",
         "status": "running",
         "platform": "Render.com",
-        "version": "2.0"
+        "version": "3.0 - curl-cffi"
     })
 
 def run_flask():
@@ -526,7 +493,7 @@ def run_flask():
 # ==========================================
 
 if __name__ == "__main__":
-    log("=== RENDER.COM DEPLOYMENT (BROWSER-FREE) ===", "INFO")
+    log("=== RENDER.COM DEPLOYMENT (AKAMAI BYPASSER) ===", "INFO")
     log("Validating environment variables...", "INFO")
 
     required_vars = ["TOKEN_MEN", "TOKEN_WOMEN", "ADMIN_CHAT_ID", "COOKIE_FILE_CONTENT"]
@@ -538,11 +505,9 @@ if __name__ == "__main__":
 
     log("All environment variables validated", "SUCCESS")
 
-    # Start Flask in separate thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     log(f"Health endpoint running on port {PORT}", "SUCCESS")
 
-    # Start monitor
-    monitor_instance = BrowserFreeMonitor()
+    monitor_instance = AkamaiBypasser()
     monitor_instance.start()
