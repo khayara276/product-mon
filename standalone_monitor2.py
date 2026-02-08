@@ -7,11 +7,9 @@ import os
 import re
 import requests
 import sqlite3
-import tempfile
 from datetime import datetime
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from DrissionPage import ChromiumPage, ChromiumOptions
 from flask import Flask, jsonify
 
 # ==========================================
@@ -27,33 +25,32 @@ PORT = int(os.environ.get("PORT", 8080))
 # Settings
 SESSION_DB_PATH = "session_monitor.db"
 CHECK_INTERVAL = 0.05
-HEADLESS_MODE = True
 NUM_WORKERS = 50
 BURST_TRIGGER_THRESHOLD = 15
 
-# URLs
+# API URLs
 CATEGORY_CONFIGS = {
     'Universal': {
-        'url': "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=0&pageSize=45&format=json&query=%3Arelevance&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein",
-        'tab': None
+        'url': "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=0&pageSize=45&format=json&query=%3Arelevance&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
     },
     'Women': {
-        'url': "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=0&pageSize=45&format=json&query=%3Arelevance%3Agenderfilter%3AWomen&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=genderfilter%3AWomen&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein",
-        'tab': None
+        'url': "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=0&pageSize=45&format=json&query=%3Arelevance%3Agenderfilter%3AWomen&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=genderfilter%3AWomen&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
     },
     'Men': {
-        'url': "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=0&pageSize=45&format=json&query=%3Arelevance%3Agenderfilter%3AMen&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=genderfilter%3AMen&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein",
-        'tab': None
+        'url': "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=0&pageSize=45&format=json&query=%3Arelevance%3Agenderfilter%3AMen&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=genderfilter%3AMen&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
     }
 }
 
 # Flask app for health check
 app = Flask(__name__)
 
-# Session
+# Sessions
 tg_session = requests.Session()
-retries = Retry(total=5, backoff_factor=0.2, status_forcelist=[500, 502, 503, 504])
-tg_session.mount('https://', HTTPAdapter(max_retries=retries, pool_connections=200, pool_maxsize=200))
+api_session = requests.Session()
+
+retry_config = Retry(total=5, backoff_factor=0.2, status_forcelist=[500, 502, 503, 504])
+tg_session.mount('https://', HTTPAdapter(max_retries=retry_config, pool_connections=200, pool_maxsize=200))
+api_session.mount('https://', HTTPAdapter(max_retries=retry_config, pool_connections=200, pool_maxsize=200))
 
 # ==========================================
 # 🛠️ UTILITY FUNCTIONS
@@ -66,7 +63,79 @@ def log(message, level="INFO"):
     icon = icons.get(level, "📝")
     print(f"[{timestamp}] {icon} {message}", flush=True)
 
+def setup_api_session():
+    """Setup API session with cookies and headers"""
+    try:
+        cookie_content = os.environ.get("COOKIE_FILE_CONTENT")
+        if not cookie_content:
+            log("No cookies provided", "ERROR")
+            return False
+
+        cookies_list = json.loads(cookie_content)
+        log(f"Loading {len(cookies_list)} cookies...", "INFO")
+
+        # Set cookies
+        cookies_dict = {}
+        for cookie in cookies_list:
+            name = cookie.get('name')
+            value = cookie.get('value')
+            if name and value:
+                cookies_dict[name] = value
+
+        api_session.cookies.update(cookies_dict)
+
+        # Set realistic browser headers
+        api_session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.sheinindia.in/',
+            'Origin': 'https://www.sheinindia.in',
+            'Connection': 'keep-alive',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+        })
+
+        log(f"API session configured with {len(api_session.cookies)} cookies", "SUCCESS")
+        return True
+
+    except Exception as e:
+        log(f"API session setup failed: {e}", "ERROR")
+        return False
+
+def fetch_api(url):
+    """Fetch data from API"""
+    try:
+        # Add cache buster
+        separator = '&' if '?' in url else '?'
+        url_with_ts = f"{url}{separator}_t={int(time.time() * 1000)}"
+
+        response = api_session.get(url_with_ts, timeout=15)
+
+        if response.status_code == 403:
+            log(f"403 Access Denied - Check cookies", "ERROR")
+            return "403_ERROR"
+
+        if response.status_code != 200:
+            log(f"API returned status {response.status_code}", "WARNING")
+            return f"ERROR_{response.status_code}"
+
+        return response.json()
+
+    except requests.exceptions.Timeout:
+        log("Request timeout", "ERROR")
+        return "TIMEOUT"
+    except Exception as e:
+        log(f"API fetch error: {e}", "ERROR")
+        return None
+
 def send_telegram(message, token, image_url=None, button_url=None):
+    """Send message via Telegram"""
     try:
         payload = {
             "chat_id": ADMIN_CHAT_ID,
@@ -96,6 +165,7 @@ def send_telegram(message, token, image_url=None, button_url=None):
         log(f"Telegram error: {e}", "ERROR")
 
 def get_target_token(cat_name, product_data):
+    """Route notification to appropriate channel"""
     if cat_name == 'Men':
         return TOKEN_MEN
     elif cat_name == 'Women':
@@ -112,9 +182,8 @@ def get_target_token(cat_name, product_data):
 # 🚀 MONITOR CLASS
 # ==========================================
 
-class StandaloneMonitor:
+class BrowserFreeMonitor:
     def __init__(self):
-        self.browser = None
         self.running = True
         self.details_queue = queue.Queue()
         self.db_queue = queue.Queue()
@@ -124,13 +193,13 @@ class StandaloneMonitor:
             try:
                 os.remove(SESSION_DB_PATH)
                 log("Session DB cleared", "SUCCESS")
-            except Exception:
+            except:
                 pass
 
-        self.init_db_file()
+        self.init_db()
         log("Session system initialized", "SUCCESS")
 
-    def init_db_file(self):
+    def init_db(self):
         try:
             conn = sqlite3.connect(SESSION_DB_PATH)
             cursor = conn.cursor()
@@ -158,7 +227,7 @@ class StandaloneMonitor:
                 self.db_queue.task_done()
             except queue.Empty:
                 continue
-            except Exception:
+            except:
                 pass
 
         conn.close()
@@ -169,76 +238,6 @@ class StandaloneMonitor:
         self.session_cache.add(pid)
         self.db_queue.put(pid)
         return True
-
-    def get_browser_options(self, port, headless=HEADLESS_MODE):
-        co = ChromiumOptions()
-        co.set_local_port(port)
-        co.set_user_data_path(os.path.join(tempfile.gettempdir(), f"monitor_profile_{port}"))
-        co.set_argument('--no-sandbox')
-        co.set_argument('--disable-dev-shm-usage')
-        co.set_argument('--mute-audio')
-        co.set_argument('--blink-settings=imagesEnabled=false')
-        co.set_argument('--disable-gpu')
-
-        if headless:
-            co.set_argument('--headless=new')
-
-        return co
-
-    def init_monitor(self):
-        log("Starting browser initialization...", "INFO")
-        port = random.randint(30001, 40000)
-        co = self.get_browser_options(port)
-
-        try:
-            self.browser = ChromiumPage(co)
-            log("Browser instance created", "SUCCESS")
-        except Exception as e:
-            log(f"Browser creation failed: {e}", "ERROR")
-            return False
-
-        # Load cookies from environment variable
-        cookie_content = os.environ.get("COOKIE_FILE_CONTENT")
-        if cookie_content:
-            try:
-                log("Loading cookies from environment...", "INFO")
-                cookies = json.loads(cookie_content)
-                self.browser.get('https://www.sheinindia.in/')
-                time.sleep(2)
-                self.browser.set.cookies(cookies)
-                self.browser.refresh()
-                time.sleep(2)
-                log("Cookies loaded successfully", "SUCCESS")
-            except Exception as e:
-                log(f"Cookie loading failed: {e}", "ERROR")
-                return False
-        else:
-            log("No cookies provided in environment", "ERROR")
-            return False
-
-        # Initialize tabs
-        CATEGORY_CONFIGS['Universal']['tab'] = self.browser.latest_tab
-        for cat in ['Women', 'Men']:
-            CATEGORY_CONFIGS[cat]['tab'] = self.browser.new_tab('https://www.sheinindia.in/')
-            time.sleep(0.5)
-
-        log("All tabs initialized", "SUCCESS")
-        return True
-
-    def fetch_via_js(self, tab, url):
-        js_code = f"""
-        return fetch("{url}&_t=" + Date.now(), {{
-            headers: {{'Cache-Control': 'no-cache', 'Pragma': 'no-cache'}}
-        }}).then(res => {{
-            if(res.status === 403) return "403";
-            if(!res.ok) return "ERR_" + res.status;
-            return res.json();
-        }}).catch(err => "ERR_NETWORK");
-        """
-        try:
-            return tab.run_js(js_code, timeout=12)
-        except:
-            return None
 
     def send_burst_alerts(self, product_list, token):
         log(f"BURST MODE: {len(product_list)} alerts", "INFO")
@@ -268,13 +267,14 @@ class StandaloneMonitor:
                 basic_data = item.get('basic_data', {})
 
                 detail_url = f"https://www.sheinindia.in/api/p/{pid}?fields=SITE"
-                active_tabs = [c['tab'] for c in CATEGORY_CONFIGS.values() if c['tab']]
-                worker_tab = random.choice(active_tabs) if active_tabs else CATEGORY_CONFIGS['Universal']['tab']
 
+                # Retry mechanism
                 data = None
                 for attempt in range(5):
-                    data = self.fetch_via_js(worker_tab, detail_url)
+                    log(f"Fetching {pid} (Attempt {attempt+1}/5)", "INFO")
+                    data = fetch_api(detail_url)
                     if isinstance(data, dict):
+                        log(f"Details fetched: {pid}", "SUCCESS")
                         break
                     time.sleep(1.5)
 
@@ -286,7 +286,7 @@ class StandaloneMonitor:
                 self.details_queue.task_done()
             except queue.Empty:
                 continue
-            except Exception:
+            except:
                 pass
 
     def extract_image_url(self, full_data):
@@ -295,14 +295,17 @@ class StandaloneMonitor:
             if img:
                 return img
             base_opts = full_data.get('baseOptions', [])
-            if base_opts:
-                img = base_opts[0].get('options', [])[0].get('modelImage', {}).get('url')
-                if img:
-                    return img
+            if base_opts and len(base_opts) > 0:
+                options = base_opts[0].get('options', [])
+                if options and len(options) > 0:
+                    img = options[0].get('modelImage', {}).get('url')
+                    if img:
+                        return img
             if 'images' in full_data and len(full_data['images']) > 0:
                 return full_data['images'][0].get('url')
         except:
-            return None
+            pass
+        return None
 
     def extract_basic_image(self, basic_data):
         try:
@@ -311,7 +314,8 @@ class StandaloneMonitor:
             if 'fnlColorVariantData' in basic_data:
                 return basic_data['fnlColorVariantData'].get('outfitPictureURL')
         except:
-            return None
+            pass
+        return None
 
     def format_and_send_alert(self, pid, cat, full_data, is_burst, token, basic_data=None):
         try:
@@ -344,7 +348,6 @@ class StandaloneMonitor:
                             size_list.append(f"✅ **{size}** : In Stock")
                         else:
                             size_list.append(f"❌ {size} : Out")
-
                     sizes_text = "\n".join(size_list)
                 else:
                     sizes_text = "⚠️ Check stock"
@@ -372,7 +375,6 @@ class StandaloneMonitor:
 
     def process_category(self, cat_name):
         config = CATEGORY_CONFIGS[cat_name]
-        tab = config['tab']
         base_url = config['url']
 
         log(f"Started monitoring {cat_name}", "INFO")
@@ -380,10 +382,10 @@ class StandaloneMonitor:
         while self.running:
             try:
                 first_page_url = re.sub(r'currentPage=\d+', 'currentPage=0', base_url)
-                data = self.fetch_via_js(tab, first_page_url)
+                data = fetch_api(first_page_url)
 
-                if data == "403":
-                    log(f"[{cat_name}] 403 error", "ERROR")
+                if data == "403_ERROR":
+                    log(f"[{cat_name}] 403 error - Check cookies", "ERROR")
                     time.sleep(5)
                     continue
 
@@ -394,21 +396,24 @@ class StandaloneMonitor:
                 pagination = data.get('pagination', {})
                 total_pages = pagination.get('totalPages', 1)
 
+                log(f"[{cat_name}] Processing {total_pages} pages", "INFO")
+
                 all_products = []
                 for page_num in range(total_pages):
                     if page_num == 0:
                         page_products = data.get('products', [])
                     else:
                         page_url = re.sub(r'currentPage=\d+', f'currentPage={page_num}', base_url)
-                        page_data = self.fetch_via_js(tab, page_url)
+                        page_data = fetch_api(page_url)
                         if isinstance(page_data, dict):
                             page_products = page_data.get('products', [])
                         else:
                             page_products = []
 
                     all_products.extend(page_products)
+                    log(f"[{cat_name}] Page {page_num+1}/{total_pages} done", "INFO")
 
-                new_session_items = []
+                new_items = []
                 for p in all_products:
                     pid = p.get('fnlColorVariantData', {}).get('colorGroup') or p.get('code')
                     if not pid:
@@ -420,15 +425,15 @@ class StandaloneMonitor:
                         continue
 
                     if self.check_and_add_seen(pid):
-                        new_session_items.append(p)
+                        new_items.append(p)
 
-                count = len(new_session_items)
+                count = len(new_items)
                 if count > 0:
-                    log(f"[{cat_name}] Found {count} new items", "SUCCESS")
+                    log(f"[{cat_name}] Found {count} new items!", "SUCCESS")
 
                     should_burst = count <= BURST_TRIGGER_THRESHOLD
                     items_with_tokens = []
-                    for p in new_session_items:
+                    for p in new_items:
                         token = get_target_token(cat_name, p)
                         items_with_tokens.append((p, token))
 
@@ -459,8 +464,10 @@ class StandaloneMonitor:
                 time.sleep(2)
 
     def start(self):
-        if not self.init_monitor():
-            log("Monitor initialization failed", "ERROR")
+        log("=== BROWSER-FREE MONITOR STARTING ===", "INFO")
+
+        if not setup_api_session():
+            log("API session setup failed", "ERROR")
             return
 
         log("=== ENGINE FULLY OPERATIONAL ===", "SUCCESS")
@@ -482,8 +489,6 @@ class StandaloneMonitor:
                 time.sleep(1)
         except KeyboardInterrupt:
             self.running = False
-            if self.browser:
-                self.browser.quit()
 
 # ==========================================
 # 🌐 FLASK HEALTH ENDPOINT
@@ -505,20 +510,23 @@ def health():
 @app.route('/')
 def home():
     return jsonify({
-        "service": "Product Monitor",
+        "service": "Product Monitor (Browser-Free)",
         "status": "running",
-        "platform": "Render.com"
+        "platform": "Render.com",
+        "version": "2.0"
     })
 
 def run_flask():
-    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
+    from waitress import serve
+    log("Starting production WSGI server...", "INFO")
+    serve(app, host='0.0.0.0', port=PORT, threads=4)
 
 # ==========================================
 # 🎯 MAIN EXECUTION
 # ==========================================
 
 if __name__ == "__main__":
-    log("=== RENDER.COM DEPLOYMENT ===", "INFO")
+    log("=== RENDER.COM DEPLOYMENT (BROWSER-FREE) ===", "INFO")
     log("Validating environment variables...", "INFO")
 
     required_vars = ["TOKEN_MEN", "TOKEN_WOMEN", "ADMIN_CHAT_ID", "COOKIE_FILE_CONTENT"]
@@ -536,5 +544,5 @@ if __name__ == "__main__":
     log(f"Health endpoint running on port {PORT}", "SUCCESS")
 
     # Start monitor
-    monitor_instance = StandaloneMonitor()
+    monitor_instance = BrowserFreeMonitor()
     monitor_instance.start()
