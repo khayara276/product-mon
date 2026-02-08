@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: product-monitor
+    env: docker
+    plan: free
+    region: singapore
+    branch: main
+    healthCheckPath: /health
+    autoDeploy: true
+
+    envVars:
+      - key: TOKEN_MEN
+        sync: false
+      - key: TOKEN_WOMEN
+        sync: false
+      - key: ADMIN_CHAT_ID
+        sync: false
+      - key: COOKIE_FILE_CONTENT
+        sync: false
+      - key: PORT
+        value: 8080
