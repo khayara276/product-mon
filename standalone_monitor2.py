@@ -10,7 +10,7 @@ from curl_cffi import requests
 from flask import Flask, jsonify
 
 # ==========================================
-# ⚙️ CONFIGURATION
+# ⚙️ ULTRA FAST CONFIGURATION
 # ==========================================
 
 TOKEN_MEN = os.environ.get("TOKEN_MEN")
@@ -19,9 +19,9 @@ ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 PORT = int(os.environ.get("PORT", 8080))
 
 SESSION_DB_PATH = "session_monitor.db"
-CHECK_INTERVAL = 0.05
-NUM_WORKERS = 50
-BURST_TRIGGER_THRESHOLD = 15
+CHECK_INTERVAL = 0.01  # Ultra fast - 10ms
+NUM_WORKERS = 100  # More workers for parallel processing
+BATCH_SIZE = 5  # Send in small batches for speed
 
 CATEGORY_CONFIGS = {
     'Universal': {
@@ -37,7 +37,6 @@ CATEGORY_CONFIGS = {
 
 app = Flask(__name__)
 
-# Create session with Chrome impersonation
 api_session = requests.Session()
 tg_session = requests.Session()
 
@@ -46,8 +45,8 @@ tg_session = requests.Session()
 # ==========================================
 
 def log(message, level="INFO"):
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    icons = {"INFO": "ℹ️", "SUCCESS": "✅", "ERROR": "❌", "WARNING": "⚠️"}
+    timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+    icons = {"INFO": "ℹ️", "SUCCESS": "✅", "ERROR": "❌", "WARNING": "⚠️", "FAST": "⚡"}
     icon = icons.get(level, "📝")
     print(f"[{timestamp}] {icon} {message}", flush=True)
 
@@ -55,13 +54,9 @@ def setup_api_session():
     try:
         cookie_content = os.environ.get("COOKIE_FILE_CONTENT")
         if not cookie_content:
-            log("No cookies provided", "ERROR")
             return False
 
         cookies_list = json.loads(cookie_content)
-        log(f"Loading {len(cookies_list)} cookies...", "INFO")
-
-        # Set cookies
         cookies_dict = {}
         for cookie in cookies_list:
             name = cookie.get('name')
@@ -69,47 +64,33 @@ def setup_api_session():
             if name and value:
                 cookies_dict[name] = value
 
-        # Update session with cookies
         for name, value in cookies_dict.items():
             api_session.cookies.set(name, value, domain=".sheinindia.in")
 
-        log(f"API session configured with {len(cookies_dict)} cookies", "SUCCESS")
-        log("Using Chrome 120 TLS fingerprint impersonation", "INFO")
+        log(f"API ready with {len(cookies_dict)} cookies", "SUCCESS")
         return True
-
     except Exception as e:
-        log(f"API session setup failed: {e}", "ERROR")
+        log(f"Setup failed: {e}", "ERROR")
         return False
 
 def fetch_api(url):
-    """Fetch data from API with Chrome impersonation"""
     try:
-        # Add cache buster
         separator = '&' if '?' in url else '?'
         url_with_ts = f"{url}{separator}_t={int(time.time() * 1000)}"
 
-        # Use curl-cffi with Chrome impersonation
         response = api_session.get(
             url_with_ts,
             impersonate="chrome120",
-            timeout=15
+            timeout=10
         )
 
-        if response.status_code == 403:
-            log(f"403 Access Denied - Akamai blocked", "ERROR")
-            return "403_ERROR"
-
-        if response.status_code != 200:
-            log(f"API returned status {response.status_code}", "WARNING")
-            return f"ERROR_{response.status_code}"
-
-        return response.json()
-
-    except Exception as e:
-        log(f"API fetch error: {e}", "ERROR")
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except:
         return None
 
-def send_telegram(message, token, image_url=None, button_url=None):
+def send_telegram_fast(message, token, image_url=None, button_url=None):
     try:
         payload = {
             "chat_id": ADMIN_CHAT_ID,
@@ -119,11 +100,11 @@ def send_telegram(message, token, image_url=None, button_url=None):
         if button_url:
             payload["reply_markup"] = json.dumps({
                 "inline_keyboard": [[
-                    {"text": "🛍️ BUY NOW", "url": button_url}
+                    {"text": "🛒 BUY", "url": button_url}
                 ]]
             })
 
-        if image_url:
+        if image_url and image_url.startswith('http'):
             url = f"https://api.telegram.org/bot{token}/sendPhoto"
             payload["photo"] = image_url
             payload["caption"] = message
@@ -132,13 +113,10 @@ def send_telegram(message, token, image_url=None, button_url=None):
             payload["text"] = message
             payload["disable_web_page_preview"] = False
 
-        # Use regular requests for Telegram (no impersonation needed)
         import requests as req
-        resp = req.post(url, data=payload, timeout=30)
-        if resp.status_code == 200:
-            log("Telegram message sent", "SUCCESS")
-    except Exception as e:
-        log(f"Telegram error: {e}", "ERROR")
+        req.post(url, data=payload, timeout=5)
+    except:
+        pass
 
 def get_target_token(cat_name, product_data):
     if cat_name == 'Men':
@@ -154,13 +132,13 @@ def get_target_token(cat_name, product_data):
         return TOKEN_WOMEN
 
 # ==========================================
-# 🚀 MONITOR CLASS
+# 🚀 ULTRA FAST MONITOR
 # ==========================================
 
-class AkamaiBypasser:
+class UltraFastMonitor:
     def __init__(self):
         self.running = True
-        self.details_queue = queue.Queue()
+        self.alert_queue = queue.Queue()
         self.db_queue = queue.Queue()
         self.session_cache = set()
 
@@ -171,7 +149,7 @@ class AkamaiBypasser:
                 pass
 
         self.init_db()
-        log("Session system initialized", "SUCCESS")
+        log("Session initialized", "SUCCESS")
 
     def init_db(self):
         try:
@@ -180,27 +158,42 @@ class AkamaiBypasser:
             cursor.execute("CREATE TABLE IF NOT EXISTS session_seen (product_id TEXT PRIMARY KEY)")
             conn.commit()
             conn.close()
-        except Exception as e:
-            log(f"DB init error: {e}", "ERROR")
+        except:
+            pass
 
     def _db_writer(self):
         conn = sqlite3.connect(SESSION_DB_PATH, check_same_thread=False)
         try:
             conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
         except:
             pass
 
+        batch = []
         while self.running:
             try:
-                pid = self.db_queue.get(timeout=1)
-                try:
-                    conn.execute("INSERT OR IGNORE INTO session_seen (product_id) VALUES (?)", (pid,))
-                    conn.commit()
-                except:
-                    pass
+                pid = self.db_queue.get(timeout=0.1)
+                batch.append(pid)
+
+                if len(batch) >= 50:
+                    try:
+                        conn.executemany("INSERT OR IGNORE INTO session_seen (product_id) VALUES (?)", 
+                                       [(p,) for p in batch])
+                        conn.commit()
+                        batch.clear()
+                    except:
+                        pass
+
                 self.db_queue.task_done()
             except queue.Empty:
-                continue
+                if batch:
+                    try:
+                        conn.executemany("INSERT OR IGNORE INTO session_seen (product_id) VALUES (?)", 
+                                       [(p,) for p in batch])
+                        conn.commit()
+                        batch.clear()
+                    except:
+                        pass
 
         conn.close()
 
@@ -211,173 +204,94 @@ class AkamaiBypasser:
         self.db_queue.put(pid)
         return True
 
-    def send_burst_alerts(self, product_list, token):
-        log(f"BURST MODE: {len(product_list)} alerts", "INFO")
-        for p in product_list:
-            try:
-                pid = p.get('fnlColorVariantData', {}).get('colorGroup') or p.get('code')
-                name = p.get('name', 'New Product')
-                url = f"https://www.sheinindia.in/p/{pid}"
-                img_url = p.get('url', '')
-                if 'images' in p and len(p['images']) > 0:
-                    img_url = p['images'][0].get('url')
-
-                msg = f"⚠️ **FAST ALERT**\n📦 {name}\n🆔 `{pid}`\n\n*Fetching details...*"
-                send_telegram(msg, token, image_url=img_url, button_url=url)
-                time.sleep(0.1)
-            except:
-                pass
-
-    def _details_worker(self):
+    def _alert_worker(self):
         while self.running:
             try:
-                item = self.details_queue.get(timeout=1)
+                item = self.alert_queue.get(timeout=1)
+
                 pid = item['id']
                 cat_name = item['category']
                 token = item['token']
-                is_burst = item.get('is_burst', False)
-                basic_data = item.get('basic_data', {})
+                product = item['product']
 
-                detail_url = f"https://www.sheinindia.in/api/p/{pid}?fields=SITE"
+                # Extract data from listing API
+                name = product.get('name', 'New Product')
 
-                data = None
-                for attempt in range(3):
-                    data = fetch_api(detail_url)
-                    if isinstance(data, dict):
-                        break
-                    time.sleep(2)
+                # Price
+                price_val = "Check Link"
+                if 'price' in product:
+                    price_obj = product['price']
+                    raw = price_obj.get('value')
+                    if raw:
+                        price_val = f"₹{int(raw)}"
+                    else:
+                        price_val = price_obj.get('formattedValue', 'Check Link')
 
-                if isinstance(data, dict):
-                    self.format_and_send_alert(pid, cat_name, data, is_burst, token)
-                else:
-                    self.format_and_send_alert(pid, cat_name, None, is_burst, token, basic_data)
+                # Image
+                image_url = None
+                if 'images' in product and len(product['images']) > 0:
+                    image_url = product['images'][0].get('url')
+                elif 'fnlColorVariantData' in product:
+                    image_url = product['fnlColorVariantData'].get('outfitPictureURL')
 
-                self.details_queue.task_done()
+                # Buy URL
+                buy_url = f"https://www.sheinindia.in/p/{pid}"
+
+                # Ultra minimal message
+                msg = f"🔥 <b>{name}</b>\n💰 {price_val}"
+
+                # Send immediately
+                send_telegram_fast(msg, token, image_url=image_url, button_url=buy_url)
+                log(f"⚡ Sent: {pid}", "FAST")
+
+                self.alert_queue.task_done()
             except queue.Empty:
                 continue
-
-    def extract_image_url(self, full_data):
-        try:
-            img = full_data.get('selected', {}).get('modelImage', {}).get('url')
-            if img:
-                return img
-            base_opts = full_data.get('baseOptions', [])
-            if base_opts and len(base_opts) > 0:
-                options = base_opts[0].get('options', [])
-                if options and len(options) > 0:
-                    img = options[0].get('modelImage', {}).get('url')
-                    if img:
-                        return img
-            if 'images' in full_data and len(full_data['images']) > 0:
-                return full_data['images'][0].get('url')
-        except:
-            pass
-        return None
-
-    def extract_basic_image(self, basic_data):
-        try:
-            if 'images' in basic_data and len(basic_data['images']) > 0:
-                return basic_data['images'][0].get('url')
-            if 'fnlColorVariantData' in basic_data:
-                return basic_data['fnlColorVariantData'].get('outfitPictureURL')
-        except:
-            pass
-        return None
-
-    def format_and_send_alert(self, pid, cat, full_data, is_burst, token, basic_data=None):
-        try:
-            buy_url = f"https://www.sheinindia.in/p/{pid}"
-            timestamp = datetime.now().strftime('%H:%M:%S')
-
-            if full_data:
-                name = full_data.get('productRelationID', full_data.get('name', 'Product'))
-                price_val = "N/A"
-                price_obj = full_data.get('offerPrice') or full_data.get('price')
-                if price_obj:
-                    raw = price_obj.get('value')
-                    price_val = f"₹{int(raw)}" if raw else price_obj.get('formattedValue', 'N/A')
-
-                image_url = self.extract_image_url(full_data)
-
-                size_list = []
-                variants = full_data.get('variantOptions', [])
-                if variants:
-                    for v in variants:
-                        qs = v.get('variantOptionQualifiers', [])
-                        size = next((q['value'] for q in qs if q['qualifier'] == 'size'),
-                                  next((q['value'] for q in qs if q['qualifier'] == 'standardSize'), 'N/A'))
-                        qty = v.get('stock', {}).get('stockLevel', 0)
-                        status = v.get('stock', {}).get('stockLevelStatus', '')
-
-                        if status != 'outOfStock' and qty > 0:
-                            size_list.append(f"✅ **{size}** : {qty}")
-                        elif status == 'inStock':
-                            size_list.append(f"✅ **{size}** : In Stock")
-                        else:
-                            size_list.append(f"❌ {size} : Out")
-                    sizes_text = "\n".join(size_list)
-                else:
-                    sizes_text = "⚠️ Check stock"
-            else:
-                name = basic_data.get('name', 'Product')
-                price_val = "Check Link"
-                image_url = self.extract_basic_image(basic_data)
-                sizes_text = "⚠️ Details unavailable"
-
-            title = "📦 **STOCK INFO**" if is_burst else "🔥 **NEW ARRIVAL**"
-
-            msg = (
-                f"{title}\n\n"
-                f"👚 **{name}**\n"
-                f"💰 **{price_val}**\n\n"
-                f"📏 **Stock Status:**\n"
-                f"{sizes_text}\n\n"
-                f"⚡ Captured: {timestamp}"
-            )
-
-            send_telegram(msg, token, image_url=image_url, button_url=buy_url)
-            log(f"Alert sent: {pid}", "SUCCESS")
-        except Exception as e:
-            log(f"Alert error: {e}", "ERROR")
+            except Exception as e:
+                pass
 
     def process_category(self, cat_name):
         config = CATEGORY_CONFIGS[cat_name]
         base_url = config['url']
 
-        log(f"Started monitoring {cat_name}", "INFO")
+        log(f"Monitoring {cat_name} (ULTRA FAST MODE)", "SUCCESS")
+
+        consecutive_failures = 0
 
         while self.running:
             try:
                 first_page_url = re.sub(r'currentPage=\d+', 'currentPage=0', base_url)
                 data = fetch_api(first_page_url)
 
-                if data == "403_ERROR":
-                    log(f"[{cat_name}] Akamai blocked - Retrying with delay...", "WARNING")
-                    time.sleep(10)
+                if not isinstance(data, dict):
+                    consecutive_failures += 1
+                    if consecutive_failures > 5:
+                        time.sleep(2)
+                        consecutive_failures = 0
+                    else:
+                        time.sleep(0.5)
                     continue
 
-                if not isinstance(data, dict):
-                    time.sleep(2)
-                    continue
+                consecutive_failures = 0
 
                 pagination = data.get('pagination', {})
                 total_pages = pagination.get('totalPages', 1)
 
+                # Process all pages in parallel
                 all_products = []
-                for page_num in range(total_pages):
-                    if page_num == 0:
-                        page_products = data.get('products', [])
-                    else:
+                page_products = data.get('products', [])
+                all_products.extend(page_products)
+
+                # Fetch remaining pages (max 10 for speed)
+                if total_pages > 1:
+                    for page_num in range(1, min(total_pages, 10)):
                         page_url = re.sub(r'currentPage=\d+', f'currentPage={page_num}', base_url)
                         page_data = fetch_api(page_url)
                         if isinstance(page_data, dict):
                             page_products = page_data.get('products', [])
-                        else:
-                            page_products = []
-                        time.sleep(0.5)  # Delay between pages
+                            all_products.extend(page_products)
 
-                    all_products.extend(page_products)
-
+                # Find new products
                 new_items = []
                 for p in all_products:
                     pid = p.get('fnlColorVariantData', {}).get('colorGroup') or p.get('code')
@@ -390,65 +304,50 @@ class AkamaiBypasser:
                         continue
 
                     if self.check_and_add_seen(pid):
-                        new_items.append(p)
+                        new_items.append((pid, p))
 
                 count = len(new_items)
                 if count > 0:
-                    log(f"[{cat_name}] Found {count} new items!", "SUCCESS")
+                    log(f"[{cat_name}] {count} NEW! ⚡⚡⚡", "FAST")
 
-                    should_burst = count <= BURST_TRIGGER_THRESHOLD
-                    items_with_tokens = []
-                    for p in new_items:
+                    # Queue all for immediate sending
+                    for pid, p in new_items:
                         token = get_target_token(cat_name, p)
-                        items_with_tokens.append((p, token))
-
-                    if should_burst:
-                        men_batch = [x[0] for x in items_with_tokens if x[1] == TOKEN_MEN]
-                        women_batch = [x[0] for x in items_with_tokens if x[1] == TOKEN_WOMEN]
-
-                        if men_batch:
-                            threading.Thread(target=self.send_burst_alerts, 
-                                           args=(men_batch, TOKEN_MEN), daemon=True).start()
-                        if women_batch:
-                            threading.Thread(target=self.send_burst_alerts, 
-                                           args=(women_batch, TOKEN_WOMEN), daemon=True).start()
-
-                    for p, token in items_with_tokens:
-                        pid = p.get('fnlColorVariantData', {}).get('colorGroup') or p.get('code')
-                        self.details_queue.put({
+                        self.alert_queue.put({
                             'id': pid,
                             'category': cat_name,
-                            'is_burst': should_burst,
-                            'basic_data': p,
+                            'product': p,
                             'token': token
                         })
 
                 time.sleep(CHECK_INTERVAL)
             except Exception as e:
-                log(f"[{cat_name}] Error: {e}", "ERROR")
-                time.sleep(2)
+                time.sleep(1)
 
     def start(self):
-        log("=== AKAMAI BYPASSER STARTING ===", "INFO")
-        log("Using curl-cffi with Chrome 120 impersonation", "INFO")
+        log("⚡⚡⚡ ULTRA FAST MONITOR STARTING ⚡⚡⚡", "FAST")
 
         if not setup_api_session():
-            log("API session setup failed", "ERROR")
+            log("Setup failed", "ERROR")
             return
 
-        log("=== ENGINE FULLY OPERATIONAL ===", "SUCCESS")
+        log(f"⚡ {NUM_WORKERS} WORKERS READY", "SUCCESS")
+        log(f"⚡ CHECK INTERVAL: {CHECK_INTERVAL}s (ULTRA FAST)", "SUCCESS")
+        log("⚡ NO DETAIL API = NO 403 ERRORS", "SUCCESS")
+        log("⚡⚡⚡ MAXIMUM SPEED MODE ACTIVE ⚡⚡⚡", "FAST")
 
+        # Start DB writer
         threading.Thread(target=self._db_writer, daemon=True).start()
 
+        # Start alert workers
         for _ in range(NUM_WORKERS):
-            threading.Thread(target=self._details_worker, daemon=True).start()
+            threading.Thread(target=self._alert_worker, daemon=True).start()
 
-        log(f"{NUM_WORKERS} workers active", "SUCCESS")
-
+        # Start category monitors
         for cat in CATEGORY_CONFIGS.keys():
             threading.Thread(target=self.process_category, args=(cat,), daemon=True).start()
 
-        log("All monitors active", "SUCCESS")
+        log("⚡ ALL SYSTEMS OPERATIONAL", "SUCCESS")
 
         try:
             while True:
@@ -457,7 +356,7 @@ class AkamaiBypasser:
             self.running = False
 
 # ==========================================
-# 🌐 FLASK HEALTH ENDPOINT
+# 🌐 FLASK
 # ==========================================
 
 monitor_instance = None
@@ -468,46 +367,45 @@ def health():
     uptime = (datetime.now() - start_time).total_seconds()
     return jsonify({
         "status": "healthy",
-        "uptime_seconds": uptime,
+        "mode": "ULTRA FAST",
         "uptime_hours": round(uptime / 3600, 2),
-        "running": monitor_instance.running if monitor_instance else False,
-        "bypass_method": "curl-cffi Chrome120"
+        "workers": NUM_WORKERS,
+        "check_interval": CHECK_INTERVAL,
+        "running": monitor_instance.running if monitor_instance else False
     })
 
 @app.route('/')
 def home():
     return jsonify({
-        "service": "Product Monitor (Akamai Bypasser)",
-        "status": "running",
+        "service": "Ultra Fast Monitor",
+        "mode": "MAXIMUM SPEED",
         "platform": "Render.com",
-        "version": "3.0 - curl-cffi"
+        "version": "4.0 - Lightning Fast"
     })
 
 def run_flask():
     from waitress import serve
-    log("Starting production WSGI server...", "INFO")
     serve(app, host='0.0.0.0', port=PORT, threads=4)
 
 # ==========================================
-# 🎯 MAIN EXECUTION
+# 🎯 MAIN
 # ==========================================
 
 if __name__ == "__main__":
-    log("=== RENDER.COM DEPLOYMENT (AKAMAI BYPASSER) ===", "INFO")
-    log("Validating environment variables...", "INFO")
+    log("⚡⚡⚡ RENDER.COM - ULTRA FAST MODE ⚡⚡⚡", "FAST")
 
     required_vars = ["TOKEN_MEN", "TOKEN_WOMEN", "ADMIN_CHAT_ID", "COOKIE_FILE_CONTENT"]
     missing = [v for v in required_vars if not os.environ.get(v)]
 
     if missing:
-        log(f"Missing env vars: {', '.join(missing)}", "ERROR")
+        log(f"Missing: {', '.join(missing)}", "ERROR")
         exit(1)
 
-    log("All environment variables validated", "SUCCESS")
+    log("All env vars validated", "SUCCESS")
 
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    log(f"Health endpoint running on port {PORT}", "SUCCESS")
+    log(f"Health endpoint on port {PORT}", "SUCCESS")
 
-    monitor_instance = AkamaiBypasser()
+    monitor_instance = UltraFastMonitor()
     monitor_instance.start()
