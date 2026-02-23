@@ -21,23 +21,25 @@ PORT = int(os.environ.get("PORT", 8080))
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")  # Render provides this automatically
 
 SESSION_DB_PATH = "session_monitor.db"
-CHECK_INTERVAL = 0.01  # Ultra fast - 10ms
-NUM_WORKERS = 150  # More workers for parallel processing
-PAGE_FETCH_WORKERS = 20  # Parallel page fetchers
+CHECK_INTERVAL = 0.05  # Reduced slightly to prevent CPU choking
+NUM_WORKERS = 60  # Optimized to prevent Akamai DDoS block (403)
+PAGE_FETCH_WORKERS = 10  # Optimized for rate-limits
 SELF_PING_INTERVAL = 600  # 10 minutes
+SESSION_CLEAR_INTERVAL = 6 * 3600  # 6 ghante (6 hours in seconds) ke baad session clear hoga
 
 # Priority Sizes for Stock
 PRIORITY_SIZES = ["M", "L", "XL", "32", "34", "36"]
 
+# API URLs are set to AJIO servers for fast backend monitoring
 CATEGORY_CONFIGS = {
     'Universal': {
-        'url': "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&currentPage=0&pageSize=45&format=json&query=%3Arelevance&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
+        'url': "https://sheinindia.ajio.com/api/category/sverse-5939-37961?fields=SITE&currentPage=0&pageSize=45&format=json&query=%3Arelevance&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=ajio"
     },
     'Women': {
-        'url': "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&Page=0&pageSize=45&format=json&query=%3Arelevance%3Agenderfilter%3AWomen&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=genderfilter%3AWomen&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
+        'url': "https://sheinindia.ajio.com/api/category/sverse-5939-37961?fields=SITE&currentPage=0&pageSize=45&format=json&query=%3Arelevance%3Agenderfilter%3AWomen&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=genderfilter%3AWomen&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&"
     },
     'Men': {
-        'url': "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&Page=0&pageSize=45&format=json&query=%3Arelevance%3Agenderfilter%3AMen&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=genderfilter%3AMen&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=shein"
+        'url': "https://sheinindia.ajio.com/api/category/sverse-5939-37961?fields=SITE&currentPage=0&pageSize=45&format=json&query=%3Arelevance%3Agenderfilter%3AMen&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=genderfilter%3AMen&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=ajio"
     }
 }
 
@@ -47,7 +49,6 @@ app = Flask(__name__)
 # 🛡️ MULTI-FINGERPRINT ANTI-BAN SYSTEM
 # ==========================================
 
-# Different browsers and versions to rotate and prevent blocks
 BROWSER_FINGERPRINTS = [
     "chrome100", "chrome101", "chrome104", "chrome106", "chrome108",
     "chrome110", "chrome114", "chrome116", "chrome119", "chrome120",
@@ -59,56 +60,93 @@ API_SESSIONS_POOL = []
 
 def log(message, level="INFO"):
     timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-    icons = {"INFO": "ℹ️", "SUCCESS": "✅", "ERROR": "❌", "WARNING": "⚠️", "FAST": "⚡", "PING": "🔔", "STOCK": "📦"}
+    icons = {"INFO": "ℹ️", "SUCCESS": "✅", "ERROR": "❌", "WARNING": "⚠️", "FAST": "⚡", "PING": "🔔", "STOCK": "📦", "CLEAN": "🧹"}
     icon = icons.get(level, "📝")
     print(f"[{timestamp}] {icon} {message}", flush=True)
 
 def setup_multi_session_pool():
-    """Creates a pool of sessions, each with a different fingerprint"""
+    """Creates a pool of sessions with Smart Cookie Parsing"""
     try:
-        cookie_content = os.environ.get("COOKIE_FILE_CONTENT")
+        cookie_content = os.environ.get("COOKIE_FILE_CONTENT", "").strip()
         if not cookie_content:
             log("No cookies provided in environment!", "ERROR")
             return False
 
-        cookies_list = json.loads(cookie_content)
         cookies_dict = {}
-        for cookie in cookies_list:
-            name = cookie.get('name')
-            value = cookie.get('value')
-            if name and value:
-                cookies_dict[name] = value
+        
+        # SMART COOKIE PARSER: Handles List JSON, Dict JSON, and raw string formats
+        try:
+            parsed = json.loads(cookie_content)
+            if isinstance(parsed, list):
+                # Format: [{"name": "LS", "value": "LOGGED_IN"}, ...]
+                for cookie in parsed:
+                    name = cookie.get('name')
+                    value = cookie.get('value')
+                    if name and value:
+                        cookies_dict[name] = value
+            elif isinstance(parsed, dict):
+                # Format: {"LS": "LOGGED_IN", "vr": "WEB-2.0.11", ...}
+                for name, value in parsed.items():
+                    cookies_dict[name] = str(value)
+            log("Parsed cookies from JSON format.", "INFO")
+        except json.JSONDecodeError:
+            # Fallback to single string line (key=value; key2=value2)
+            log("Parsing cookies from Single String format...", "INFO")
+            parts = cookie_content.split(';')
+            for part in parts:
+                if '=' in part:
+                    k, v = part.split('=', 1)
+                    cookies_dict[k.strip()] = v.strip()
 
-        # Create 30 distinct sessions with random fingerprints
+        if not cookies_dict:
+            log("Failed to extract any valid cookies!", "ERROR")
+            return False
+
+        # Create distinct sessions with random fingerprints
         for _ in range(30):
             fingerprint = random.choice(BROWSER_FINGERPRINTS)
             session = requests.Session(impersonate=fingerprint)
             
-            # Inject cookies
+            # Anti-ban Headers (Updated for Ajio domain monitoring)
+            session.headers.update({
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://sheinindia.ajio.com/',
+                'Origin': 'https://sheinindia.ajio.com',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin'
+            })
+            
+            # Inject cookies for both domains to prevent 403 on stock API
             for name, value in cookies_dict.items():
                 session.cookies.set(name, value, domain=".sheinindia.in")
+                session.cookies.set(name, value, domain=".ajio.com")
+                session.cookies.set(name, value, domain="sheinindia.ajio.com")
             
             API_SESSIONS_POOL.append({
                 "session": session,
                 "fingerprint": fingerprint
             })
 
-        log(f"Multi-Fingerprint Pool ready with {len(API_SESSIONS_POOL)} rotating sessions!", "SUCCESS")
+        log(f"Multi-Fingerprint Pool ready with {len(API_SESSIONS_POOL)} sessions & {len(cookies_dict)} cookies!", "SUCCESS")
         return True
     except Exception as e:
         log(f"Session Pool Setup failed: {e}", "ERROR")
         return False
 
 def fetch_api(url, timeout=10):
-    """Fetches URL using a random fingerprint to avoid blocks"""
+    """Fetches URL using a random fingerprint with slight human delay"""
     try:
-        # Rotate fingerprint randomly
+        # Micro-delay to avoid Akamai rate-limit bans (0.1 to 0.4 seconds)
+        time.sleep(random.uniform(0.1, 0.4))
+        
         session_data = random.choice(API_SESSIONS_POOL)
         session = session_data["session"]
         
-        # Add random cache buster
+        # Add cache buster
         separator = '&' if '?' in url else '?'
-        url_with_ts = f"{url}{separator}_t={int(time.time() * 1000)}&_r={random.randint(1000, 9999)}"
+        url_with_ts = f"{url}{separator}_t={int(time.time() * 1000)}&_r={random.randint(10000, 99999)}"
 
         response = session.get(url_with_ts, timeout=timeout)
 
@@ -125,9 +163,9 @@ def fetch_api(url, timeout=10):
 # ==========================================
 
 def fetch_product_stock(pid):
-    """Fetches real-time stock info for a single product"""
+    """Fetches real-time stock info from AJIO API"""
     url = f"https://sheinindia.ajio.com/api/p/{pid}?fields=SITE"
-    data = fetch_api(url, timeout=5)
+    data = fetch_api(url, timeout=8)
     
     if not data: return None
     
@@ -135,7 +173,6 @@ def fetch_product_stock(pid):
     found_priority = []
     
     try:
-        # Extract stock logic similar to db_stock_monitor.py
         for v in data.get('variantOptions', []):
             qs = v.get('variantOptionQualifiers', [])
             size = next((q['value'] for q in qs if q['qualifier'] == 'size'), 
@@ -167,7 +204,6 @@ def send_telegram_fast(message, token, image_url=None, button_url=None):
             })
 
         if image_url and image_url.startswith('http'):
-            # clean thumbnail
             image_url = re.sub(r'_\d+x\d+', '', image_url).replace('_thumbnail', '')
             url = f"https://api.telegram.org/bot{token}/sendPhoto"
             payload["photo"] = image_url
@@ -191,7 +227,7 @@ def get_target_token(cat_name, product_data):
         return TOKEN_WOMEN
 
 # ==========================================
-# 🔔 SELF-PING KEEPER (PREVENTS SLEEP)
+# 🔔 SELF-PING KEEPER
 # ==========================================
 
 def self_ping_keeper():
@@ -210,7 +246,7 @@ def self_ping_keeper():
         except: pass
 
 # ==========================================
-# 🚀 COMPLETE COVERAGE ULTRA FAST MONITOR
+# 🚀 COMPLETE COVERAGE MONITOR
 # ==========================================
 
 class CompleteCoverageMonitor:
@@ -234,6 +270,30 @@ class CompleteCoverageMonitor:
             conn.execute("CREATE TABLE IF NOT EXISTS session_seen (product_id TEXT PRIMARY KEY)")
             conn.commit(); conn.close()
         except: pass
+
+    def clear_session_db(self):
+        """ Clears the seen products memory and SQLite Database """
+        try:
+            self.session_cache.clear()
+            conn = sqlite3.connect(SESSION_DB_PATH)
+            conn.execute("DELETE FROM session_seen")
+            conn.commit()
+            conn.close()
+            log("Session DB aur Memory clear ho gayi hai! Ab naye aur purane dono products ke alerts dobara aayenge.", "CLEAN")
+        except Exception as e:
+            log(f"Session DB clear karne mein error aayi: {e}", "ERROR")
+
+    def _session_clear_worker(self):
+        """ Background thread jo har 6 ghante mein clear_session_db chalayega """
+        while self.running:
+            # 1-1 second ka sleep takki process turant stop ho sake jab hum band karein
+            for _ in range(SESSION_CLEAR_INTERVAL):
+                if not self.running:
+                    return
+                time.sleep(1)
+            
+            # 6 Ghante pure hone ke baad ye function chalega
+            self.clear_session_db()
 
     def _db_writer(self):
         conn = sqlite3.connect(SESSION_DB_PATH, check_same_thread=False)
@@ -269,7 +329,6 @@ class CompleteCoverageMonitor:
         return True
 
     def _alert_worker(self):
-        """Worker that fetches stock and sends alerts"""
         while self.running:
             try:
                 item = self.alert_queue.get(timeout=1)
@@ -277,21 +336,17 @@ class CompleteCoverageMonitor:
                 token = item['token']
                 product = item['product']
 
-                # 1. Fetch deep stock info
                 stock_data = fetch_product_stock(pid)
                 
-                # 2. Extract Details
                 name = product.get('name', 'New Product')
                 if stock_data and stock_data.get('full_data'):
                     name = stock_data['full_data'].get('productRelationID', stock_data['full_data'].get('name', name))
 
-                # Price
                 price_val = "Check Link"
                 if 'price' in product:
                     raw = product['price'].get('value')
                     if raw: price_val = f"₹{int(raw)}"
 
-                # Image
                 image_url = None
                 if stock_data and 'full_data' in stock_data:
                     fd = stock_data['full_data']
@@ -301,9 +356,9 @@ class CompleteCoverageMonitor:
                 if not image_url and 'images' in product and len(product['images']) > 0:
                     image_url = product['images'][0].get('url')
 
+                # ✅ PRODUCT LINK IN TELEGRAM (Strictly SHEININDIA.IN as requested)
                 buy_url = f"https://www.sheinindia.in/p/{pid}"
                 
-                # Format Stock Message
                 msg_parts = [f"🔥 <b>{name}</b>", f"💰 <b>{price_val}</b>\n"]
                 
                 if stock_data:
@@ -384,9 +439,6 @@ class CompleteCoverageMonitor:
                 consecutive_failures = 0
                 total_pages = data.get('pagination', {}).get('totalPages', 1)
                 
-                # Log without spamming terminal too much
-                # log(f"[{cat_name}] Scanning {total_pages} pages using Rotating Fingerprints", "FAST")
-                
                 all_products = self.fetch_all_pages_parallel(cat_name, base_url, total_pages)
 
                 new_items = []
@@ -417,9 +469,13 @@ class CompleteCoverageMonitor:
         if not setup_multi_session_pool(): return
 
         log(f"⚡ {PAGE_FETCH_WORKERS} PAGE FETCHERS | {NUM_WORKERS} ALERT/STOCK WORKERS", "SUCCESS")
+        log(f"🧹 Har 6 ghante mein duplicate cache clear hoga", "CLEAN")
 
         threading.Thread(target=self._db_writer, daemon=True).start()
         threading.Thread(target=self_ping_keeper, daemon=True).start()
+        
+        # Ye background mein count karega aur har 6 ghante mein session udha dega
+        threading.Thread(target=self._session_clear_worker, daemon=True).start()
 
         for _ in range(PAGE_FETCH_WORKERS):
             threading.Thread(target=self._page_fetcher_worker, daemon=True).start()
@@ -450,7 +506,8 @@ def health():
         "fingerprints_pool_size": len(API_SESSIONS_POOL),
         "uptime_hours": round((datetime.now() - start_time).total_seconds() / 3600, 2),
         "ping_count": ping_count,
-        "anti_ban": "Active (curl_cffi rotation)"
+        "anti_ban": "Active (Smart Cookie + Header Injection)",
+        "auto_clear_enabled": "True (Every 6 hours)"
     })
 
 def run_flask():
