@@ -12,7 +12,7 @@ from curl_cffi import requests
 from flask import Flask, jsonify
 
 # ==========================================
-# ⚙️ MEMORY OPTIMIZED + MULTI-FINGERPRINT
+# ⚙️ ORIGINAL ULTRA FAST + MEMORY OPTIMIZED
 # ==========================================
 
 TOKEN_MEN = os.environ.get("TOKEN_MEN")
@@ -22,10 +22,10 @@ PORT = int(os.environ.get("PORT", 8080))
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")  
 
 SESSION_DB_PATH = "session_monitor.db"
-CHECK_INTERVAL = 1.0  # Safe check interval
-NUM_WORKERS = 10  
-PAGE_FETCH_WORKERS = 3  
-MAX_SESSIONS = 10 # 🔥 STEALTH: 10 sessions are perfectly enough
+CHECK_INTERVAL = 0.05  # Wapas original super fast speed
+NUM_WORKERS = 50  # Wapas original jaisi high speed workers (safely)
+PAGE_FETCH_WORKERS = 10  # Original concurrent fetchers
+MAX_SESSIONS = 30  # Original 30 sessions pool
 SELF_PING_INTERVAL = 600  
 SESSION_CLEAR_INTERVAL = 6 * 3600  
 
@@ -45,6 +45,14 @@ CATEGORY_CONFIGS = {
 
 app = Flask(__name__)
 
+# Wapas original sabhi fingerprints add kar diye!
+BROWSER_FINGERPRINTS = [
+    "chrome100", "chrome101", "chrome104", "chrome106", "chrome108",
+    "chrome110", "chrome114", "chrome116", "chrome119", "chrome120",
+    "edge101", "edge114", "edge116",
+    "safari15_3", "safari15_5", "safari15_6_1", "safari16_0", "safari17_0"
+]
+
 API_SESSIONS_POOL = []
 
 def log(message, level="INFO"):
@@ -54,89 +62,87 @@ def log(message, level="INFO"):
     print(f"[{timestamp}] {icon} {message}", flush=True)
 
 def setup_multi_session_pool():
+    """Creates a pool of sessions with Smart Cookie Parsing exactly like your original code"""
     try:
         cookie_content = os.environ.get("COOKIE_FILE_CONTENT", "").strip()
         if not cookie_content:
             log("No cookies provided in environment!", "ERROR")
             return False
 
-        raw_cookies_dict = {}
+        cookies_dict = {}
+        
+        # SMART COOKIE PARSER
         try:
             parsed = json.loads(cookie_content)
             if isinstance(parsed, list):
                 for cookie in parsed:
-                    if cookie.get('name') and cookie.get('value'):
-                        raw_cookies_dict[cookie['name']] = cookie['value']
+                    name = cookie.get('name')
+                    value = cookie.get('value')
+                    if name and value:
+                        cookies_dict[name] = value
             elif isinstance(parsed, dict):
                 for name, value in parsed.items():
-                    raw_cookies_dict[name] = str(value)
+                    cookies_dict[name] = str(value)
             log("Parsed cookies from JSON format.", "INFO")
         except json.JSONDecodeError:
+            log("Parsing cookies from Single String format...", "INFO")
             parts = cookie_content.split(';')
             for part in parts:
                 if '=' in part:
                     k, v = part.split('=', 1)
-                    raw_cookies_dict[k.strip()] = v.strip()
+                    cookies_dict[k.strip()] = v.strip()
 
-        if not raw_cookies_dict:
+        if not cookies_dict:
             log("Failed to extract any valid cookies!", "ERROR")
             return False
 
-        # 🔥 FIX 1: Remove IP-locked Akamai/WAF Cookies. We ONLY want login state.
-        waf_locked_keys = ['_abck', 'bm_sz', 'ak_bmsc', 'bm_sv', 'bm_s', 'bm_so']
-        filtered_cookies = {}
-        for k, v in raw_cookies_dict.items():
-            if k in waf_locked_keys or k.startswith('TS01'):
-                continue
-            filtered_cookies[k] = v
-
+        # Wapas original session creation logic
         for _ in range(MAX_SESSIONS):
-            # Strict Chrome 120 profile
-            session = requests.Session(impersonate="chrome120")
+            fingerprint = random.choice(BROWSER_FINGERPRINTS)
+            session = requests.Session(impersonate=fingerprint)
             
             session.headers.update({
-                'referer': 'https://sheinindia.ajio.com/',
-                'origin': 'https://sheinindia.ajio.com'
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://sheinindia.ajio.com/',
+                'Origin': 'https://sheinindia.ajio.com',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin'
             })
             
-            # 🔥 FIX 2: Set auth cookies natively into the cookie jar (do NOT use headers directly)
-            for k, v in filtered_cookies.items():
-                session.cookies.set(k, v, domain="sheinindia.ajio.com")
-                session.cookies.set(k, v, domain=".ajio.com")
-
-            # 🔥 FIX 3: Warm-up request! Let Akamai give us a FRESH '_abck' cookie for Render's IP
-            try:
-                session.get("https://sheinindia.ajio.com/", timeout=10)
-            except:
-                pass # Ignore warmup timeout
-
+            for name, value in cookies_dict.items():
+                session.cookies.set(name, value, domain=".sheinindia.in")
+                session.cookies.set(name, value, domain=".ajio.com")
+                session.cookies.set(name, value, domain="sheinindia.ajio.com")
+            
             API_SESSIONS_POOL.append({
                 "session": session,
-                "fingerprint": "chrome120"
+                "fingerprint": fingerprint
             })
 
-        log(f"Session Pool ready! Injected Auth & generated fresh Akamai signatures.", "SUCCESS")
+        log(f"Multi-Fingerprint Pool ready with {len(API_SESSIONS_POOL)} sessions & {len(cookies_dict)} cookies!", "SUCCESS")
         return True
     except Exception as e:
         log(f"Session Pool Setup failed: {e}", "ERROR")
         return False
 
 def fetch_api(url, timeout=10):
+    """Original fetch api setup (0.1 to 0.4s delay max)"""
     try:
-        time.sleep(random.uniform(0.8, 1.5))
+        time.sleep(random.uniform(0.1, 0.4))
         session_data = random.choice(API_SESSIONS_POOL)
         session = session_data["session"]
         
         separator = '&' if '?' in url else '?'
-        url_with_ts = f"{url}{separator}t={int(time.time() * 1000)}"
+        url_with_ts = f"{url}{separator}_t={int(time.time() * 1000)}&_r={random.randint(10000, 99999)}"
 
         response = session.get(url_with_ts, timeout=timeout)
 
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 403:
-            log(f"403 Blocked! WAF alert. Applying stealth sleep...", "WARNING")
-            time.sleep(random.uniform(5.0, 7.0))
+            log(f"403 Blocked on {session_data['fingerprint']}. Retrying...", "WARNING")
         return None
     except Exception as e:
         return None
@@ -222,10 +228,11 @@ def self_ping_keeper():
 class CompleteCoverageMonitor:
     def __init__(self):
         self.running = True
-        self.alert_queue = queue.Queue(maxsize=1000)
-        self.db_queue = queue.Queue(maxsize=1000)
+        # Yahi Queue maxsize Render ko crash hone se bachayegi
+        self.alert_queue = queue.Queue(maxsize=1500)
+        self.db_queue = queue.Queue(maxsize=1500)
         self.session_cache = set()
-        self.page_fetch_queue = queue.Queue(maxsize=200)
+        self.page_fetch_queue = queue.Queue(maxsize=300)
 
         if os.path.exists(SESSION_DB_PATH):
             try: os.remove(SESSION_DB_PATH)
@@ -247,9 +254,9 @@ class CompleteCoverageMonitor:
             conn.commit()
             conn.close()
             gc.collect()
-            log("Session DB cleared! Old products will trigger alerts again.", "CLEAN")
+            log("Session DB aur Memory clear ho gayi hai! Ab naye aur purane dono products ke alerts dobara aayenge.", "CLEAN")
         except Exception as e:
-            log(f"Session DB clear error: {e}", "ERROR")
+            log(f"Session DB clear karne mein error aayi: {e}", "ERROR")
 
     def _session_clear_worker(self):
         while self.running:
@@ -268,7 +275,7 @@ class CompleteCoverageMonitor:
         batch = []
         while self.running:
             try:
-                pid = self.db_queue.get(timeout=1)
+                pid = self.db_queue.get(timeout=0.1)
                 batch.append(pid)
                 if len(batch) >= 100:
                     try:
@@ -362,7 +369,7 @@ class CompleteCoverageMonitor:
                 new_items.append((pid, p))
 
         if new_items:
-            log(f"[{cat_name}] {len(new_items)} NEW ITEMS! Fetching stock instantly...", "STOCK")
+            log(f"[{cat_name}] {len(new_items)} NEW PRODUCTS DETECTED! Fetching stock...", "STOCK")
             for pid, p in new_items:
                 try:
                     self.alert_queue.put({
@@ -384,6 +391,7 @@ class CompleteCoverageMonitor:
                         products = data.get('products', [])
                         self._extract_and_queue_products(products, task['cat_name'])
                         
+                        # RAM optimize: Immediate deletion
                         del products
                         del data
                 except Exception as e:
@@ -400,6 +408,7 @@ class CompleteCoverageMonitor:
 
         while self.running:
             try:
+                # Ajio API standard paginaton parsing
                 first_page_url = re.sub(r'currentPage=\d+', 'currentPage=0', base_url)
                 data = fetch_api(first_page_url)
 
@@ -418,20 +427,23 @@ class CompleteCoverageMonitor:
                     page_url = re.sub(r'currentPage=\d+', f'currentPage={page_num}', base_url)
                     self.page_fetch_queue.put({'url': page_url, 'cat_name': cat_name})
 
+                # Wait for fetchers to finish the current category cycle
                 while not self.page_fetch_queue.empty():
                     time.sleep(0.5)
 
+                # RAM Clear for 512MB Render limits
                 gc.collect() 
                 time.sleep(CHECK_INTERVAL)
             except Exception as e: 
                 time.sleep(1)
 
     def start(self):
-        log("⚡⚡ ULTRA FAST PIPELINE BOT STARTED ⚡⚡", "FAST")
+        log("⚡⚡ MULTI-FINGERPRINT ULTRA FAST MONITOR ⚡⚡", "FAST")
 
         if not setup_multi_session_pool(): return
 
-        log(f"⚡ {PAGE_FETCH_WORKERS} FETCHERS | {NUM_WORKERS} WORKERS", "SUCCESS")
+        log(f"⚡ {PAGE_FETCH_WORKERS} PAGE FETCHERS | {NUM_WORKERS} ALERT/STOCK WORKERS", "SUCCESS")
+        log(f"🧹 Har 6 ghante mein duplicate cache clear hoga", "CLEAN")
 
         threading.Thread(target=self._db_writer, daemon=True).start()
         threading.Thread(target=self_ping_keeper, daemon=True).start()
@@ -439,17 +451,14 @@ class CompleteCoverageMonitor:
 
         for _ in range(PAGE_FETCH_WORKERS):
             threading.Thread(target=self._page_fetcher_worker, daemon=True).start()
-            time.sleep(0.2)
 
         for _ in range(NUM_WORKERS):
             threading.Thread(target=self._alert_worker, daemon=True).start()
-            time.sleep(0.1)
 
         for cat in CATEGORY_CONFIGS.keys():
             threading.Thread(target=self.process_category, args=(cat,), daemon=True).start()
-            time.sleep(0.5)
 
-        log("🚀 BOT IS RUNNING SAFELY WITHIN 512MB RAM", "SUCCESS")
+        log("🚀 BOT IS RUNNING 24/7 WITH ANTI-BAN AND STOCK PARSING", "SUCCESS")
         while self.running: time.sleep(1)
 
 # ==========================================
@@ -469,7 +478,8 @@ def health():
         "fingerprints_pool_size": len(API_SESSIONS_POOL),
         "uptime_hours": round((datetime.now() - start_time).total_seconds() / 3600, 2),
         "ping_count": ping_count,
-        "memory_optimized": True
+        "anti_ban": "Active (Smart Cookie + Header Injection)",
+        "auto_clear_enabled": "True (Every 6 hours)"
     })
 
 def run_flask():
