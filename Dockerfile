@@ -4,6 +4,11 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
+# MEMORY OPTIMIZATIONS FOR RENDER FREE TIER
+# Prevents memory fragmentation in C/C++ libraries like curl_cffi
+ENV MALLOC_ARENA_MAX=2 
+ENV PYTHONUNBUFFERED=1
+
 # Install build dependencies for curl-cffi
 RUN apt-get update && apt-get install -y \
     ca-certificates \
