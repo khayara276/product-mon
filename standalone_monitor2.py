@@ -6,26 +6,28 @@ import os
 import re
 import random
 import sqlite3
+import gc  # Added for memory management
 from datetime import datetime
 from curl_cffi import requests
 from flask import Flask, jsonify
 
 # ==========================================
-# ⚙️ COMPLETE COVERAGE + MULTI-FINGERPRINT + ULTRA FAST
+# ⚙️ MEMORY OPTIMIZED + MULTI-FINGERPRINT
 # ==========================================
 
 TOKEN_MEN = os.environ.get("TOKEN_MEN")
 TOKEN_WOMEN = os.environ.get("TOKEN_WOMEN")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 PORT = int(os.environ.get("PORT", 8080))
-RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")  # Render provides this automatically
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")  
 
 SESSION_DB_PATH = "session_monitor.db"
-CHECK_INTERVAL = 0.05  # Reduced slightly to prevent CPU choking
-NUM_WORKERS = 60  # Optimized to prevent Akamai DDoS block (403)
-PAGE_FETCH_WORKERS = 10  # Optimized for rate-limits
+CHECK_INTERVAL = 0.2  # 🔥 FAST: 0.2s check interval for instant pickup
+NUM_WORKERS = 25  # 🔥 INCREASED: 25 workers for fast stock checking (safe due to pipeline)
+PAGE_FETCH_WORKERS = 8  # 🔥 INCREASED: 8 concurrent fetchers for pages
+MAX_SESSIONS = 15 # 🔥 INCREASED: 15 sessions for faster API calls without ban
 SELF_PING_INTERVAL = 600  # 10 minutes
-SESSION_CLEAR_INTERVAL = 6 * 3600  # 6 ghante (6 hours in seconds) ke baad session clear hoga
+SESSION_CLEAR_INTERVAL = 6 * 3600  # 6 hours
 
 # Priority Sizes for Stock
 PRIORITY_SIZES = ["M", "L", "XL", "32", "34", "36"]
@@ -50,10 +52,8 @@ app = Flask(__name__)
 # ==========================================
 
 BROWSER_FINGERPRINTS = [
-    "chrome100", "chrome101", "chrome104", "chrome106", "chrome108",
-    "chrome110", "chrome114", "chrome116", "chrome119", "chrome120",
-    "edge101", "edge114", "edge116",
-    "safari15_3", "safari15_5", "safari15_6_1", "safari16_0", "safari17_0"
+    "chrome114", "chrome116", "chrome119", "chrome120",
+    "edge114", "edge116", "safari16_0", "safari17_0"
 ]
 
 API_SESSIONS_POOL = []
@@ -74,23 +74,20 @@ def setup_multi_session_pool():
 
         cookies_dict = {}
         
-        # SMART COOKIE PARSER: Handles List JSON, Dict JSON, and raw string formats
+        # SMART COOKIE PARSER
         try:
             parsed = json.loads(cookie_content)
             if isinstance(parsed, list):
-                # Format: [{"name": "LS", "value": "LOGGED_IN"}, ...]
                 for cookie in parsed:
                     name = cookie.get('name')
                     value = cookie.get('value')
                     if name and value:
                         cookies_dict[name] = value
             elif isinstance(parsed, dict):
-                # Format: {"LS": "LOGGED_IN", "vr": "WEB-2.0.11", ...}
                 for name, value in parsed.items():
                     cookies_dict[name] = str(value)
             log("Parsed cookies from JSON format.", "INFO")
         except json.JSONDecodeError:
-            # Fallback to single string line (key=value; key2=value2)
             log("Parsing cookies from Single String format...", "INFO")
             parts = cookie_content.split(';')
             for part in parts:
@@ -102,12 +99,10 @@ def setup_multi_session_pool():
             log("Failed to extract any valid cookies!", "ERROR")
             return False
 
-        # Create distinct sessions with random fingerprints
-        for _ in range(30):
+        for _ in range(MAX_SESSIONS):
             fingerprint = random.choice(BROWSER_FINGERPRINTS)
             session = requests.Session(impersonate=fingerprint)
             
-            # Anti-ban Headers (Updated for Ajio domain monitoring)
             session.headers.update({
                 'Accept': 'application/json, text/plain, */*',
                 'Accept-Language': 'en-US,en;q=0.9',
@@ -118,7 +113,6 @@ def setup_multi_session_pool():
                 'Sec-Fetch-Site': 'same-origin'
             })
             
-            # Inject cookies for both domains to prevent 403 on stock API
             for name, value in cookies_dict.items():
                 session.cookies.set(name, value, domain=".sheinindia.in")
                 session.cookies.set(name, value, domain=".ajio.com")
@@ -129,7 +123,7 @@ def setup_multi_session_pool():
                 "fingerprint": fingerprint
             })
 
-        log(f"Multi-Fingerprint Pool ready with {len(API_SESSIONS_POOL)} sessions & {len(cookies_dict)} cookies!", "SUCCESS")
+        log(f"Multi-Fingerprint Pool ready with {len(API_SESSIONS_POOL)} sessions!", "SUCCESS")
         return True
     except Exception as e:
         log(f"Session Pool Setup failed: {e}", "ERROR")
@@ -138,15 +132,12 @@ def setup_multi_session_pool():
 def fetch_api(url, timeout=10):
     """Fetches URL using a random fingerprint with slight human delay"""
     try:
-        # Micro-delay to avoid Akamai rate-limit bans (0.1 to 0.4 seconds)
         time.sleep(random.uniform(0.1, 0.4))
-        
         session_data = random.choice(API_SESSIONS_POOL)
         session = session_data["session"]
         
-        # Add cache buster
         separator = '&' if '?' in url else '?'
-        url_with_ts = f"{url}{separator}_t={int(time.time() * 1000)}&_r={random.randint(10000, 99999)}"
+        url_with_ts = f"{url}{separator}_t={int(time.time() * 1000)}&_r={random.randint(1000, 9999)}"
 
         response = session.get(url_with_ts, timeout=timeout)
 
@@ -163,7 +154,6 @@ def fetch_api(url, timeout=10):
 # ==========================================
 
 def fetch_product_stock(pid):
-    """Fetches real-time stock info from AJIO API"""
     url = f"https://sheinindia.ajio.com/api/p/{pid}?fields=SITE"
     data = fetch_api(url, timeout=8)
     
@@ -252,12 +242,11 @@ def self_ping_keeper():
 class CompleteCoverageMonitor:
     def __init__(self):
         self.running = True
-        self.alert_queue = queue.Queue()
-        self.db_queue = queue.Queue()
+        # Max size added to prevent Queues from eating all memory
+        self.alert_queue = queue.Queue(maxsize=1000)
+        self.db_queue = queue.Queue(maxsize=1000)
         self.session_cache = set()
-        self.page_fetch_queue = queue.Queue()
-        self.page_results = {}
-        self.page_results_lock = threading.Lock()
+        self.page_fetch_queue = queue.Queue(maxsize=200)
 
         if os.path.exists(SESSION_DB_PATH):
             try: os.remove(SESSION_DB_PATH)
@@ -272,27 +261,22 @@ class CompleteCoverageMonitor:
         except: pass
 
     def clear_session_db(self):
-        """ Clears the seen products memory and SQLite Database """
         try:
             self.session_cache.clear()
             conn = sqlite3.connect(SESSION_DB_PATH)
             conn.execute("DELETE FROM session_seen")
             conn.commit()
             conn.close()
-            log("Session DB aur Memory clear ho gayi hai! Ab naye aur purane dono products ke alerts dobara aayenge.", "CLEAN")
+            gc.collect() # Force free memory
+            log("Session DB cleared! Old products will trigger alerts again.", "CLEAN")
         except Exception as e:
-            log(f"Session DB clear karne mein error aayi: {e}", "ERROR")
+            log(f"Session DB clear error: {e}", "ERROR")
 
     def _session_clear_worker(self):
-        """ Background thread jo har 6 ghante mein clear_session_db chalayega """
         while self.running:
-            # 1-1 second ka sleep takki process turant stop ho sake jab hum band karein
             for _ in range(SESSION_CLEAR_INTERVAL):
-                if not self.running:
-                    return
+                if not self.running: return
                 time.sleep(1)
-            
-            # 6 Ghante pure hone ke baad ye function chalega
             self.clear_session_db()
 
     def _db_writer(self):
@@ -305,7 +289,7 @@ class CompleteCoverageMonitor:
         batch = []
         while self.running:
             try:
-                pid = self.db_queue.get(timeout=0.1)
+                pid = self.db_queue.get(timeout=1)
                 batch.append(pid)
                 if len(batch) >= 100:
                     try:
@@ -325,63 +309,91 @@ class CompleteCoverageMonitor:
     def check_and_add_seen(self, pid):
         if pid in self.session_cache: return False
         self.session_cache.add(pid)
-        self.db_queue.put(pid)
+        try:
+            self.db_queue.put(pid, timeout=2) # Non-blocking to avoid deadlocks
+        except queue.Full: pass
         return True
 
     def _alert_worker(self):
         while self.running:
             try:
                 item = self.alert_queue.get(timeout=1)
-                pid = item['id']
-                token = item['token']
-                product = item['product']
+                try:
+                    pid = item['id']
+                    token = item['token']
+                    product = item['product']
 
-                stock_data = fetch_product_stock(pid)
-                
-                name = product.get('name', 'New Product')
-                if stock_data and stock_data.get('full_data'):
-                    name = stock_data['full_data'].get('productRelationID', stock_data['full_data'].get('name', name))
-
-                price_val = "Check Link"
-                if 'price' in product:
-                    raw = product['price'].get('value')
-                    if raw: price_val = f"₹{int(raw)}"
-
-                image_url = None
-                if stock_data and 'full_data' in stock_data:
-                    fd = stock_data['full_data']
-                    image_url = fd.get('selected', {}).get('modelImage', {}).get('url')
-                    if not image_url and 'images' in fd and fd['images']: image_url = fd['images'][0].get('url')
-
-                if not image_url and 'images' in product and len(product['images']) > 0:
-                    image_url = product['images'][0].get('url')
-
-                # ✅ PRODUCT LINK IN TELEGRAM (Strictly SHEININDIA.IN as requested)
-                buy_url = f"https://www.sheinindia.in/p/{pid}"
-                
-                msg_parts = [f"🔥 <b>{name}</b>", f"💰 <b>{price_val}</b>\n"]
-                
-                if stock_data:
-                    priority = stock_data['priority']
-                    stock = stock_data['stock']
+                    stock_data = fetch_product_stock(pid)
                     
-                    if priority: msg_parts.append(f"🎯 <b>Priority:</b> {', '.join(priority)}\n")
+                    name = product.get('name', 'New Product')
+                    if stock_data and stock_data.get('full_data'):
+                        name = stock_data['full_data'].get('productRelationID', stock_data['full_data'].get('name', name))
+
+                    price_val = "Check Link"
+                    if 'price' in product:
+                        raw = product['price'].get('value')
+                        if raw: price_val = f"₹{int(raw)}"
+
+                    image_url = None
+                    if stock_data and 'full_data' in stock_data:
+                        fd = stock_data['full_data']
+                        image_url = fd.get('selected', {}).get('modelImage', {}).get('url')
+                        if not image_url and 'images' in fd and fd['images']: image_url = fd['images'][0].get('url')
+
+                    if not image_url and 'images' in product and len(product['images']) > 0:
+                        image_url = product['images'][0].get('url')
+
+                    buy_url = f"https://www.sheinindia.in/p/{pid}"
                     
-                    if stock:
-                        all_sizes_text = "\n".join([f"{'✅' if q>0 else '❌'} {s}: {q}" for s, q in stock.items()])
-                        msg_parts.append(f"📏 <b>Full Stock:</b>\n<pre>{all_sizes_text}</pre>")
+                    msg_parts = [f"🔥 <b>{name}</b>", f"💰 <b>{price_val}</b>\n"]
+                    
+                    if stock_data:
+                        priority = stock_data['priority']
+                        stock = stock_data['stock']
+                        
+                        if priority: msg_parts.append(f"🎯 <b>Priority:</b> {', '.join(priority)}\n")
+                        
+                        if stock:
+                            all_sizes_text = "\n".join([f"{'✅' if q>0 else '❌'} {s}: {q}" for s, q in stock.items()])
+                            msg_parts.append(f"📏 <b>Full Stock:</b>\n<pre>{all_sizes_text}</pre>")
+                        else:
+                            msg_parts.append("⚠️ Stock details loading failed / Sold out")
                     else:
-                        msg_parts.append("⚠️ Stock details loading failed / Sold out")
-                else:
-                    msg_parts.append("⚡ <i>Fast Alert (Stock check skipped due to API block)</i>")
+                        msg_parts.append("⚡ <i>Fast Alert (Stock check skipped due to API block)</i>")
 
-                msg = "\n".join(msg_parts)
-                send_telegram_fast(msg, token, image_url=image_url, button_url=buy_url)
-                log(f"Alert Sent for {pid} with Stock Info!", "STOCK")
-
-                self.alert_queue.task_done()
+                    msg = "\n".join(msg_parts)
+                    send_telegram_fast(msg, token, image_url=image_url, button_url=buy_url)
+                    log(f"Alert Sent for {pid} with Stock Info!", "STOCK")
+                except Exception as e:
+                    pass
+                finally:
+                    # Guarantee task_done is called to prevent queue blocking forever
+                    self.alert_queue.task_done()
             except queue.Empty: continue
-            except: pass
+
+    def _extract_and_queue_products(self, products, cat_name):
+        """Helper to process products instantly and free memory"""
+        new_items = []
+        for p in products:
+            pid = p.get('fnlColorVariantData', {}).get('colorGroup') or p.get('code')
+            if not pid:
+                u = p.get('url', '')
+                if '/p/' in u: pid = u.split('/p/')[1].split('.html')[0].split('?')[0]
+            if not pid: continue
+
+            if self.check_and_add_seen(pid):
+                new_items.append((pid, p))
+
+        if new_items:
+            log(f"[{cat_name}] {len(new_items)} NEW ITEMS! Fetching stock instantly...", "STOCK")
+            for pid, p in new_items:
+                try:
+                    self.alert_queue.put({
+                        'id': pid, 'category': cat_name, 'product': p, 
+                        'token': get_target_token(cat_name, p)
+                    }, timeout=2)
+                except queue.Full:
+                    pass
 
     def _page_fetcher_worker(self):
         while self.running:
@@ -389,37 +401,23 @@ class CompleteCoverageMonitor:
                 task = self.page_fetch_queue.get(timeout=1)
                 if task is None: break
                 
-                data = fetch_api(task['url'])
-                
-                with self.page_results_lock:
-                    if task['request_id'] not in self.page_results:
-                        self.page_results[task['request_id']] = {}
-                    self.page_results[task['request_id']][task['page_num']] = data
-
-                self.page_fetch_queue.task_done()
+                try:
+                    data = fetch_api(task['url'])
+                    if data and isinstance(data, dict):
+                        # Pipelining: Process and send to alert queue IMMEDIATELY
+                        products = data.get('products', [])
+                        self._extract_and_queue_products(products, task['cat_name'])
+                        
+                        # Delete to free memory instantly
+                        del products
+                        del data
+                except Exception as e:
+                    pass
+                finally:
+                    # Guarantee task_done is called
+                    self.page_fetch_queue.task_done()
+                    
             except queue.Empty: continue
-            except: pass
-
-    def fetch_all_pages_parallel(self, cat_name, base_url, total_pages):
-        request_id = f"{cat_name}_{int(time.time())}"
-        for page_num in range(total_pages):
-            page_url = re.sub(r'Page=\d+', f'Page={page_num}', base_url)
-            self.page_fetch_queue.put({
-                'request_id': request_id, 'page_num': page_num, 'url': page_url
-            })
-
-        self.page_fetch_queue.join()
-
-        all_products = []
-        with self.page_results_lock:
-            if request_id in self.page_results:
-                for page_num in range(total_pages):
-                    if page_num in self.page_results[request_id]:
-                        data = self.page_results[request_id][page_num]
-                        if isinstance(data, dict):
-                            all_products.extend(data.get('products', []))
-                del self.page_results[request_id]
-        return all_products
 
     def process_category(self, cat_name):
         config = CATEGORY_CONFIGS[cat_name]
@@ -428,7 +426,8 @@ class CompleteCoverageMonitor:
 
         while self.running:
             try:
-                first_page_url = re.sub(r'Page=\d+', 'currentPage=0', base_url)
+                # Ajio API uses currentPage=0 for pagination
+                first_page_url = re.sub(r'currentPage=\d+', 'currentPage=0', base_url)
                 data = fetch_api(first_page_url)
 
                 if not isinstance(data, dict):
@@ -439,42 +438,33 @@ class CompleteCoverageMonitor:
                 consecutive_failures = 0
                 total_pages = data.get('pagination', {}).get('totalPages', 1)
                 
-                all_products = self.fetch_all_pages_parallel(cat_name, base_url, total_pages)
+                # Process 1st page directly (Zero Wait Time)
+                self._extract_and_queue_products(data.get('products', []), cat_name)
+                del data # Free memory
+                
+                # Push remaining pages to fetch queue
+                for page_num in range(1, total_pages):
+                    page_url = re.sub(r'currentPage=\d+', f'currentPage={page_num}', base_url)
+                    self.page_fetch_queue.put({'url': page_url, 'cat_name': cat_name})
 
-                new_items = []
-                for p in all_products:
-                    pid = p.get('fnlColorVariantData', {}).get('colorGroup') or p.get('code')
-                    if not pid:
-                        u = p.get('url', '')
-                        if '/p/' in u: pid = u.split('/p/')[1].split('.html')[0].split('?')[0]
-                    if not pid: continue
+                # Wait until workers finish fetching this batch so we don't duplicate loops instantly
+                while not self.page_fetch_queue.empty():
+                    time.sleep(0.5)
 
-                    if self.check_and_add_seen(pid):
-                        new_items.append((pid, p))
-
-                if new_items:
-                    log(f"[{cat_name}] {len(new_items)} NEW PRODUCTS DETECTED! Fetching stock...", "STOCK")
-                    for pid, p in new_items:
-                        self.alert_queue.put({
-                            'id': pid, 'category': cat_name, 'product': p, 
-                            'token': get_target_token(cat_name, p)
-                        })
-
+                gc.collect() 
                 time.sleep(CHECK_INTERVAL)
-            except Exception as e: time.sleep(1)
+            except Exception as e: 
+                time.sleep(1)
 
     def start(self):
-        log("⚡⚡ MULTI-FINGERPRINT ULTRA FAST MONITOR ⚡⚡", "FAST")
+        log("⚡⚡ ULTRA FAST PIPELINE BOT STARTED ⚡⚡", "FAST")
 
         if not setup_multi_session_pool(): return
 
-        log(f"⚡ {PAGE_FETCH_WORKERS} PAGE FETCHERS | {NUM_WORKERS} ALERT/STOCK WORKERS", "SUCCESS")
-        log(f"🧹 Har 6 ghante mein duplicate cache clear hoga", "CLEAN")
+        log(f"⚡ {PAGE_FETCH_WORKERS} FETCHERS | {NUM_WORKERS} WORKERS", "SUCCESS")
 
         threading.Thread(target=self._db_writer, daemon=True).start()
         threading.Thread(target=self_ping_keeper, daemon=True).start()
-        
-        # Ye background mein count karega aur har 6 ghante mein session udha dega
         threading.Thread(target=self._session_clear_worker, daemon=True).start()
 
         for _ in range(PAGE_FETCH_WORKERS):
@@ -486,7 +476,7 @@ class CompleteCoverageMonitor:
         for cat in CATEGORY_CONFIGS.keys():
             threading.Thread(target=self.process_category, args=(cat,), daemon=True).start()
 
-        log("🚀 BOT IS RUNNING 24/7 WITH ANTI-BAN AND STOCK PARSING", "SUCCESS")
+        log("🚀 BOT IS RUNNING SAFELY WITHIN 512MB RAM", "SUCCESS")
         while self.running: time.sleep(1)
 
 # ==========================================
@@ -506,8 +496,7 @@ def health():
         "fingerprints_pool_size": len(API_SESSIONS_POOL),
         "uptime_hours": round((datetime.now() - start_time).total_seconds() / 3600, 2),
         "ping_count": ping_count,
-        "anti_ban": "Active (Smart Cookie + Header Injection)",
-        "auto_clear_enabled": "True (Every 6 hours)"
+        "memory_optimized": True
     })
 
 def run_flask():
