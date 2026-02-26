@@ -22,10 +22,10 @@ PORT = int(os.environ.get("PORT", 8080))
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")  
 
 SESSION_DB_PATH = "session_monitor.db"
-CHECK_INTERVAL = 0.2  # 🔥 FAST: 0.2s check interval for instant pickup
-NUM_WORKERS = 25  # 🔥 INCREASED: 25 workers for fast stock checking (safe due to pipeline)
-PAGE_FETCH_WORKERS = 8  # 🔥 INCREASED: 8 concurrent fetchers for pages
-MAX_SESSIONS = 15 # 🔥 INCREASED: 15 sessions for faster API calls without ban
+CHECK_INTERVAL = 0.5  # 🔥 STEALTH: Thoda delay badhaya takki ban na ho
+NUM_WORKERS = 10  # 🔥 OPTIMIZED: 10 workers enough hain aur IP ban nahi hone denge
+PAGE_FETCH_WORKERS = 3  # 🔥 OPTIMIZED: 3 concurrent fetchers taaki WAF block na kare
+MAX_SESSIONS = 50 # 🔥 STEALTH: 50 alag-alag browser sessions!
 SELF_PING_INTERVAL = 600  # 10 minutes
 SESSION_CLEAR_INTERVAL = 6 * 3600  # 6 hours
 
@@ -52,8 +52,10 @@ app = Flask(__name__)
 # ==========================================
 
 BROWSER_FINGERPRINTS = [
-    "chrome114", "chrome116", "chrome119", "chrome120",
-    "edge114", "edge116", "safari16_0", "safari17_0"
+    "chrome100", "chrome104", "chrome106", "chrome110", "chrome114", 
+    "chrome116", "chrome119", "chrome120", 
+    "edge101", "edge114", "edge116", 
+    "safari15_3", "safari15_5", "safari16_0", "safari17_0"
 ]
 
 API_SESSIONS_POOL = []
@@ -131,21 +133,23 @@ def setup_multi_session_pool():
 def fetch_api(url, timeout=10):
     """Fetches URL using a random fingerprint with slight human delay"""
     try:
-        # 🔥 FIX 2: Thoda human-like delay badhaya taaki Akamai IP ban na kare (0.3s to 0.8s)
-        time.sleep(random.uniform(0.3, 0.8))
+        # 🔥 STEALTH FIX: Human delay 0.6s se 1.5s kar diya. Isse IP ban nahi hoga
+        time.sleep(random.uniform(0.6, 1.5))
         session_data = random.choice(API_SESSIONS_POOL)
         session = session_data["session"]
         
+        # 🔥 STEALTH FIX: URL me heavy randomization takki har request unique lage
         separator = '&' if '?' in url else '?'
-        url_with_ts = f"{url}{separator}_t={int(time.time() * 1000)}&_r={random.randint(1000, 9999)}"
+        rand_str = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5))
+        url_with_ts = f"{url}{separator}_t={int(time.time() * 1000)}&_r={random.randint(100000, 999999)}&_v={rand_str}"
 
         response = session.get(url_with_ts, timeout=timeout)
 
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 403:
-            log(f"403 Blocked on {session_data['fingerprint']}. Rate-limited by Firewall, applying penalty sleep...", "WARNING")
-            time.sleep(random.uniform(2.0, 4.0)) # Agar block hue, to thoda ruk jao takki ban hat jaye
+            log(f"403 Blocked on {session_data['fingerprint']}. Firewall alert! Applying 5s stealth sleep...", "WARNING")
+            time.sleep(random.uniform(4.0, 6.0)) # Lamba sleep takki IP block list se hat jaye
         return None
     except Exception as e:
         return None
@@ -468,14 +472,18 @@ class CompleteCoverageMonitor:
         threading.Thread(target=self_ping_keeper, daemon=True).start()
         threading.Thread(target=self._session_clear_worker, daemon=True).start()
 
+        # 🔥 STEALTH FIX: Staggered Thread Startup (Ek sath attack nahi karenge)
         for _ in range(PAGE_FETCH_WORKERS):
             threading.Thread(target=self._page_fetcher_worker, daemon=True).start()
+            time.sleep(0.2)
 
         for _ in range(NUM_WORKERS):
             threading.Thread(target=self._alert_worker, daemon=True).start()
+            time.sleep(0.1)
 
         for cat in CATEGORY_CONFIGS.keys():
             threading.Thread(target=self.process_category, args=(cat,), daemon=True).start()
+            time.sleep(0.5)
 
         log("🚀 BOT IS RUNNING SAFELY WITHIN 512MB RAM", "SUCCESS")
         while self.running: time.sleep(1)
