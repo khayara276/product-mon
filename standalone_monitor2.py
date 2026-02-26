@@ -99,6 +99,9 @@ def setup_multi_session_pool():
             log("Failed to extract any valid cookies!", "ERROR")
             return False
 
+        # 🔥 FIX 1: Forcefully build a raw Cookie string for Headers injection
+        cookie_string = "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
+
         for _ in range(MAX_SESSIONS):
             fingerprint = random.choice(BROWSER_FINGERPRINTS)
             session = requests.Session(impersonate=fingerprint)
@@ -110,13 +113,9 @@ def setup_multi_session_pool():
                 'Origin': 'https://sheinindia.ajio.com',
                 'Sec-Fetch-Dest': 'empty',
                 'Sec-Fetch-Mode': 'cors',
-                'Sec-Fetch-Site': 'same-origin'
+                'Sec-Fetch-Site': 'same-origin',
+                'Cookie': cookie_string  # 🔥 Yaha se cookies har request me forcefully jayengi
             })
-            
-            for name, value in cookies_dict.items():
-                session.cookies.set(name, value, domain=".sheinindia.in")
-                session.cookies.set(name, value, domain=".ajio.com")
-                session.cookies.set(name, value, domain="sheinindia.ajio.com")
             
             API_SESSIONS_POOL.append({
                 "session": session,
@@ -132,7 +131,8 @@ def setup_multi_session_pool():
 def fetch_api(url, timeout=10):
     """Fetches URL using a random fingerprint with slight human delay"""
     try:
-        time.sleep(random.uniform(0.1, 0.4))
+        # 🔥 FIX 2: Thoda human-like delay badhaya taaki Akamai IP ban na kare (0.3s to 0.8s)
+        time.sleep(random.uniform(0.3, 0.8))
         session_data = random.choice(API_SESSIONS_POOL)
         session = session_data["session"]
         
@@ -144,7 +144,8 @@ def fetch_api(url, timeout=10):
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 403:
-            log(f"403 Blocked on {session_data['fingerprint']}. Retrying...", "WARNING")
+            log(f"403 Blocked on {session_data['fingerprint']}. Rate-limited by Firewall, applying penalty sleep...", "WARNING")
+            time.sleep(random.uniform(2.0, 4.0)) # Agar block hue, to thoda ruk jao takki ban hat jaye
         return None
     except Exception as e:
         return None
