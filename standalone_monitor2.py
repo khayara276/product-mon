@@ -6,7 +6,7 @@ import os
 import re
 import random
 import sqlite3
-import gc  # Added for memory management
+import gc
 from datetime import datetime
 from curl_cffi import requests
 from flask import Flask, jsonify
@@ -22,17 +22,15 @@ PORT = int(os.environ.get("PORT", 8080))
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")  
 
 SESSION_DB_PATH = "session_monitor.db"
-CHECK_INTERVAL = 0.5  # 🔥 STEALTH: Thoda delay badhaya takki ban na ho
-NUM_WORKERS = 10  # 🔥 OPTIMIZED: 10 workers enough hain aur IP ban nahi hone denge
-PAGE_FETCH_WORKERS = 3  # 🔥 OPTIMIZED: 3 concurrent fetchers taaki WAF block na kare
-MAX_SESSIONS = 50 # 🔥 STEALTH: 50 alag-alag browser sessions!
-SELF_PING_INTERVAL = 600  # 10 minutes
-SESSION_CLEAR_INTERVAL = 6 * 3600  # 6 hours
+CHECK_INTERVAL = 1.0  # Safe check interval
+NUM_WORKERS = 10  
+PAGE_FETCH_WORKERS = 3  
+MAX_SESSIONS = 10 # 🔥 STEALTH: 10 sessions are perfectly enough
+SELF_PING_INTERVAL = 600  
+SESSION_CLEAR_INTERVAL = 6 * 3600  
 
-# Priority Sizes for Stock
 PRIORITY_SIZES = ["M", "L", "XL", "32", "34", "36"]
 
-# API URLs are set to AJIO servers for fast backend monitoring
 CATEGORY_CONFIGS = {
     'Universal': {
         'url': "https://sheinindia.ajio.com/api/category/sverse-5939-37961?fields=SITE&currentPage=0&pageSize=45&format=json&query=%3Arelevance&gridColumns=5&segmentIds=23%2C14%2C18%2C9&cohortIds=value%7Cmen%2CTEMP_M1_LL_FG_NOV&customerType=Existing&facets=&customertype=Existing&advfilter=true&platform=Desktop&showAdsOnNextPage=false&is_ads_enable_plp=true&displayRatings=true&segmentIds=&&store=ajio"
@@ -47,17 +45,6 @@ CATEGORY_CONFIGS = {
 
 app = Flask(__name__)
 
-# ==========================================
-# 🛡️ MULTI-FINGERPRINT ANTI-BAN SYSTEM
-# ==========================================
-
-BROWSER_FINGERPRINTS = [
-    "chrome100", "chrome104", "chrome106", "chrome110", "chrome114", 
-    "chrome116", "chrome119", "chrome120", 
-    "edge101", "edge114", "edge116", 
-    "safari15_3", "safari15_5", "safari16_0", "safari17_0"
-]
-
 API_SESSIONS_POOL = []
 
 def log(message, level="INFO"):
@@ -67,89 +54,89 @@ def log(message, level="INFO"):
     print(f"[{timestamp}] {icon} {message}", flush=True)
 
 def setup_multi_session_pool():
-    """Creates a pool of sessions with Smart Cookie Parsing"""
     try:
         cookie_content = os.environ.get("COOKIE_FILE_CONTENT", "").strip()
         if not cookie_content:
             log("No cookies provided in environment!", "ERROR")
             return False
 
-        cookies_dict = {}
-        
-        # SMART COOKIE PARSER
+        raw_cookies_dict = {}
         try:
             parsed = json.loads(cookie_content)
             if isinstance(parsed, list):
                 for cookie in parsed:
-                    name = cookie.get('name')
-                    value = cookie.get('value')
-                    if name and value:
-                        cookies_dict[name] = value
+                    if cookie.get('name') and cookie.get('value'):
+                        raw_cookies_dict[cookie['name']] = cookie['value']
             elif isinstance(parsed, dict):
                 for name, value in parsed.items():
-                    cookies_dict[name] = str(value)
+                    raw_cookies_dict[name] = str(value)
             log("Parsed cookies from JSON format.", "INFO")
         except json.JSONDecodeError:
-            log("Parsing cookies from Single String format...", "INFO")
             parts = cookie_content.split(';')
             for part in parts:
                 if '=' in part:
                     k, v = part.split('=', 1)
-                    cookies_dict[k.strip()] = v.strip()
+                    raw_cookies_dict[k.strip()] = v.strip()
 
-        if not cookies_dict:
+        if not raw_cookies_dict:
             log("Failed to extract any valid cookies!", "ERROR")
             return False
 
-        # 🔥 FIX 1: Forcefully build a raw Cookie string for Headers injection
-        cookie_string = "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
+        # 🔥 FIX 1: Remove IP-locked Akamai/WAF Cookies. We ONLY want login state.
+        waf_locked_keys = ['_abck', 'bm_sz', 'ak_bmsc', 'bm_sv', 'bm_s', 'bm_so']
+        filtered_cookies = {}
+        for k, v in raw_cookies_dict.items():
+            if k in waf_locked_keys or k.startswith('TS01'):
+                continue
+            filtered_cookies[k] = v
 
         for _ in range(MAX_SESSIONS):
-            fingerprint = random.choice(BROWSER_FINGERPRINTS)
-            session = requests.Session(impersonate=fingerprint)
+            # Strict Chrome 120 profile
+            session = requests.Session(impersonate="chrome120")
             
             session.headers.update({
-                'Accept': 'application/json, text/plain, */*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Referer': 'https://sheinindia.ajio.com/',
-                'Origin': 'https://sheinindia.ajio.com',
-                'Sec-Fetch-Dest': 'empty',
-                'Sec-Fetch-Mode': 'cors',
-                'Sec-Fetch-Site': 'same-origin',
-                'Cookie': cookie_string  # 🔥 Yaha se cookies har request me forcefully jayengi
+                'referer': 'https://sheinindia.ajio.com/',
+                'origin': 'https://sheinindia.ajio.com'
             })
             
+            # 🔥 FIX 2: Set auth cookies natively into the cookie jar (do NOT use headers directly)
+            for k, v in filtered_cookies.items():
+                session.cookies.set(k, v, domain="sheinindia.ajio.com")
+                session.cookies.set(k, v, domain=".ajio.com")
+
+            # 🔥 FIX 3: Warm-up request! Let Akamai give us a FRESH '_abck' cookie for Render's IP
+            try:
+                session.get("https://sheinindia.ajio.com/", timeout=10)
+            except:
+                pass # Ignore warmup timeout
+
             API_SESSIONS_POOL.append({
                 "session": session,
-                "fingerprint": fingerprint
+                "fingerprint": "chrome120"
             })
 
-        log(f"Multi-Fingerprint Pool ready with {len(API_SESSIONS_POOL)} sessions!", "SUCCESS")
+        log(f"Session Pool ready! Injected Auth & generated fresh Akamai signatures.", "SUCCESS")
         return True
     except Exception as e:
         log(f"Session Pool Setup failed: {e}", "ERROR")
         return False
 
 def fetch_api(url, timeout=10):
-    """Fetches URL using a random fingerprint with slight human delay"""
     try:
-        # 🔥 STEALTH FIX: Human delay 0.6s se 1.5s kar diya. Isse IP ban nahi hoga
-        time.sleep(random.uniform(0.6, 1.5))
+        time.sleep(random.uniform(0.8, 1.5))
         session_data = random.choice(API_SESSIONS_POOL)
         session = session_data["session"]
         
-        # 🔥 STEALTH FIX: URL me heavy randomization takki har request unique lage
         separator = '&' if '?' in url else '?'
-        rand_str = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5))
-        url_with_ts = f"{url}{separator}_t={int(time.time() * 1000)}&_r={random.randint(100000, 999999)}&_v={rand_str}"
+        url_with_ts = f"{url}{separator}t={int(time.time() * 1000)}"
 
         response = session.get(url_with_ts, timeout=timeout)
 
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 403:
-            log(f"403 Blocked on {session_data['fingerprint']}. Firewall alert! Applying 5s stealth sleep...", "WARNING")
-            time.sleep(random.uniform(4.0, 6.0)) # Lamba sleep takki IP block list se hat jaye
+            log(f"403 Blocked! WAF alert. Applying stealth sleep...", "WARNING")
+            time.sleep(random.uniform(5.0, 7.0))
         return None
     except Exception as e:
         return None
@@ -185,10 +172,6 @@ def fetch_product_stock(pid):
     
     return {"stock": current_stock, "priority": found_priority, "full_data": data}
 
-# ==========================================
-# 🛠️ TELEGRAM ALERTS
-# ==========================================
-
 def send_telegram_fast(message, token, image_url=None, button_url=None):
     try:
         payload = {"chat_id": ADMIN_CHAT_ID, "parse_mode": "HTML"}
@@ -221,10 +204,6 @@ def get_target_token(cat_name, product_data):
         elif 'men' in seg_text: return TOKEN_MEN
         return TOKEN_WOMEN
 
-# ==========================================
-# 🔔 SELF-PING KEEPER
-# ==========================================
-
 def self_ping_keeper():
     import requests as req
     time.sleep(30)
@@ -240,14 +219,9 @@ def self_ping_keeper():
             if res.status_code == 200: log("🔔 Self-ping success", "PING")
         except: pass
 
-# ==========================================
-# 🚀 COMPLETE COVERAGE MONITOR
-# ==========================================
-
 class CompleteCoverageMonitor:
     def __init__(self):
         self.running = True
-        # Max size added to prevent Queues from eating all memory
         self.alert_queue = queue.Queue(maxsize=1000)
         self.db_queue = queue.Queue(maxsize=1000)
         self.session_cache = set()
@@ -272,7 +246,7 @@ class CompleteCoverageMonitor:
             conn.execute("DELETE FROM session_seen")
             conn.commit()
             conn.close()
-            gc.collect() # Force free memory
+            gc.collect()
             log("Session DB cleared! Old products will trigger alerts again.", "CLEAN")
         except Exception as e:
             log(f"Session DB clear error: {e}", "ERROR")
@@ -315,7 +289,7 @@ class CompleteCoverageMonitor:
         if pid in self.session_cache: return False
         self.session_cache.add(pid)
         try:
-            self.db_queue.put(pid, timeout=2) # Non-blocking to avoid deadlocks
+            self.db_queue.put(pid, timeout=2)
         except queue.Full: pass
         return True
 
@@ -372,12 +346,10 @@ class CompleteCoverageMonitor:
                 except Exception as e:
                     pass
                 finally:
-                    # Guarantee task_done is called to prevent queue blocking forever
                     self.alert_queue.task_done()
             except queue.Empty: continue
 
     def _extract_and_queue_products(self, products, cat_name):
-        """Helper to process products instantly and free memory"""
         new_items = []
         for p in products:
             pid = p.get('fnlColorVariantData', {}).get('colorGroup') or p.get('code')
@@ -409,17 +381,14 @@ class CompleteCoverageMonitor:
                 try:
                     data = fetch_api(task['url'])
                     if data and isinstance(data, dict):
-                        # Pipelining: Process and send to alert queue IMMEDIATELY
                         products = data.get('products', [])
                         self._extract_and_queue_products(products, task['cat_name'])
                         
-                        # Delete to free memory instantly
                         del products
                         del data
                 except Exception as e:
                     pass
                 finally:
-                    # Guarantee task_done is called
                     self.page_fetch_queue.task_done()
                     
             except queue.Empty: continue
@@ -431,7 +400,6 @@ class CompleteCoverageMonitor:
 
         while self.running:
             try:
-                # Ajio API uses currentPage=0 for pagination
                 first_page_url = re.sub(r'currentPage=\d+', 'currentPage=0', base_url)
                 data = fetch_api(first_page_url)
 
@@ -443,16 +411,13 @@ class CompleteCoverageMonitor:
                 consecutive_failures = 0
                 total_pages = data.get('pagination', {}).get('totalPages', 1)
                 
-                # Process 1st page directly (Zero Wait Time)
                 self._extract_and_queue_products(data.get('products', []), cat_name)
-                del data # Free memory
+                del data 
                 
-                # Push remaining pages to fetch queue
                 for page_num in range(1, total_pages):
                     page_url = re.sub(r'currentPage=\d+', f'currentPage={page_num}', base_url)
                     self.page_fetch_queue.put({'url': page_url, 'cat_name': cat_name})
 
-                # Wait until workers finish fetching this batch so we don't duplicate loops instantly
                 while not self.page_fetch_queue.empty():
                     time.sleep(0.5)
 
@@ -472,7 +437,6 @@ class CompleteCoverageMonitor:
         threading.Thread(target=self_ping_keeper, daemon=True).start()
         threading.Thread(target=self._session_clear_worker, daemon=True).start()
 
-        # 🔥 STEALTH FIX: Staggered Thread Startup (Ek sath attack nahi karenge)
         for _ in range(PAGE_FETCH_WORKERS):
             threading.Thread(target=self._page_fetcher_worker, daemon=True).start()
             time.sleep(0.2)
